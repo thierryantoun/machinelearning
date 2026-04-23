@@ -8,10 +8,6 @@ n_steps = int(T / dt_max) + 10
 
 @jax.jit
 def advection_solver(u):
-    """
-    u : (n,) condition initiale
-    Retourne F = Σ_k f^k_{i+1/2} : (n,) flux cumulé aux faces (la cible du modèle)
-    """
     def step(carry, _):
         u, F, t = carry
         a = jnp.sin(t)
