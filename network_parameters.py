@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 
-N = 10000
-n = 64
+N = 1000
+n = 512
 T = 0.5
 K = 20
 cfl = 0.5
