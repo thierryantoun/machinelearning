@@ -4,19 +4,21 @@ from network_parameters import cfl, x, T
 
 dx = x[1] - x[0]
 dt_max = 0.005
-n_steps = int(T / dt_max) + 10
+n_steps = 1000
 
-@jax.jit
-def advection_solver(u):
-    def step(carry, _):
-        u, F, t = carry
-        a = jnp.sin(t)
-        dt = jnp.minimum(cfl * dx / (jnp.abs(a) + 1e-10), dt_max)
-        f_face = jnp.where(a > 0, a * u, a * jnp.roll(u, -1))
-        F = F + f_face
-        u = u - dt / dx * (f_face - jnp.roll(f_face, 1))
-        return (u, F, t + dt), None
-
-    F_init = jnp.zeros_like(u)
-    (_, F_target, _), _ = jax.lax.scan(step, (u, F_init, 0.0), None, length=n_steps)
-    return F_target
+def advection_solver(u, n_steps):
+  t = 0
+  dx = x[1] - x[0]
+  eps = 1e-10
+  F = jnp.zeros_like(u)
+  u0 = u
+  for t in range(n_steps):
+    a = 1
+    dt = jnp.minimum(cfl * dx / jnp.max(jnp.abs(a)), 0.005)
+    f_face = jnp.where(a > 0, 
+                  dt * a * u,
+                  dt * a * jnp.roll(u, -1))
+    u = u - 1/dx * (f_face - jnp.roll(f_face, 1))
+    F += f_face
+    t += dt
+  return F
