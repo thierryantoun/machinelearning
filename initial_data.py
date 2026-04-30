@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from jax import random
 from network_parameters import K, x
 
-def generate_initial_data(key, nb_frequences=K):
+def generate_initial_data(key, nb_frequences=K, x=x):
     key, subkey = random.split(key)
     ic_type = random.randint(subkey, (), 0, 3)  # 0: sinus, 1: gaussiennes, 2: polynomes
 
