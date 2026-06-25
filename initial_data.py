@@ -5,7 +5,7 @@ from network_parameters import K, x
 
 def generate_initial_data(key, nb_frequences=K, x=x):
     key, subkey = random.split(key)
-    ic_type = random.randint(subkey, (), 0, 3)  # 0: sinus, 1: gaussiennes, 2: polynomes
+    ic_type = random.randint(subkey, (), 0, 4)  # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante
 
     key, subkey = random.split(key)
 
@@ -29,13 +29,20 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         # polynome aléatoire de degré 5 evalué sur [0,1], rendu périodique
         k1, k2 = random.split(subkey)
         degree = 5
-        coeffs = random.uniform(k1, (degree+1,), minval=-1.0, maxval=1.0)
+        coeffs = random.uniform(k1, (degree+1,), minval=-5.0, maxval=5.0)
         u = jnp.polyval(coeffs, x)
         # rend périodique en soustrayant la droite reliant u(0) à u(1)
         u = u - (u[-1] - u[0]) * x - u[0]
         return u
+    
+    def make_constante(subkey):
+        c = random.uniform(subkey, (), minval=-5.0, maxval=5.0)
+        return jnp.ones_like(x) * c
 
-    u = jax.lax.switch(ic_type, [make_sinus, make_gaussiennes, make_polynomes], subkey)
-    u = u / jnp.max(jnp.abs(u))
+    is_constante = (ic_type == 3)
+    u = jax.lax.switch(ic_type, [make_sinus, make_gaussiennes, make_polynomes, make_constante], subkey)
+    # on normalise seulement les signaux non constants (pour les constantes l'amplitude est
+    # l'information utile — la diviser reviendrait à toujours avoir ±1)
+    u = jnp.where(is_constante, u, u / jnp.max(jnp.abs(u)))
 
     return u
