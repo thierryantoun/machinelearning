@@ -3,6 +3,16 @@ import jax.numpy as jnp
 from jax import random
 from network_parameters import K, x
 
+
+def make_sinus_u0(key):
+    k1, k2 = random.split(key)
+    a_k = random.uniform(k1, (K,), minval=-1.0, maxval=1.0)
+    phase_k = random.uniform(k2, (K,), minval=0.0, maxval=2 * jnp.pi)
+    ks = jnp.arange(1, K + 1)
+    u = jnp.sum(a_k[:, None] * jnp.sin(2 * jnp.pi * ks[:, None] * x[None, :] + phase_k[:, None]), axis=0)
+    return u / jnp.max(jnp.abs(u))
+
+
 def generate_initial_data(key, nb_frequences=K, x=x):
     key, subkey = random.split(key)
     ic_type = random.randint(subkey, (), 0, 4)  # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante

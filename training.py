@@ -4,7 +4,7 @@ from jax import random
 import optax
 import pickle
 from functools import partial
-from network_parameters import N, batch_size, nb_epoch, n_batches, x, SOLVER
+from network_parameters import N, batch_size, nb_epoch, x, SOLVER
 from initial_data import generate_initial_data
 from loss import model, loss_fn, make_train_step
 
@@ -18,14 +18,38 @@ CHECKPOINT_PATH = "checkpoint.pkl"
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)
 
-# données : tout en (N, n), aucune dimension canal
 _solver = partial(_solver, n_steps=n_steps)
 
-u0s_training = jax.vmap(generate_initial_data)(random.split(key_train, N))   # (N, n)
-_, F_targets_training, _ = jax.vmap(_solver)(u0s_training)  # (N, n)
 
-u0s_validation = jax.vmap(generate_initial_data)(random.split(key_val, N))   # (N, n)
-_, F_targets_validation, _ = jax.vmap(_solver)(u0s_validation)               # (N, n)
+N_TRAJ   = 50 # nombre de trajectoires
+N_CHUNKS = 100 # nombre de paires (u0, F) par trajectoire
+
+
+def generate_trajectory(key):
+    "Une trajectoire de N_CHUNKS * n_steps pas."
+    u0 = generate_initial_data(key)
+
+    def run_chunk(u, _):
+        u_final, _, t = _solver(u)
+        return u_final, (u, u_final, t)
+
+    _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=N_CHUNKS)
+    return u0s, u_finals, ts
+
+
+N_total_paires = N_TRAJ * N_CHUNKS
+
+u0s_training, u_finals_training, ts_training = jax.vmap(generate_trajectory)(random.split(key_train, N_TRAJ))
+u0s_training    = u0s_training.reshape(N_total_paires, -1)
+u_finals_training = u_finals_training.reshape(N_total_paires, -1)
+ts_training     = ts_training.reshape(N_total_paires)
+
+u0s_validation, u_finals_validation, ts_validation = jax.vmap(generate_trajectory)(random.split(key_val, N_TRAJ))
+u0s_validation    = u0s_validation.reshape(N_total_paires, -1)
+u_finals_validation = u_finals_validation.reshape(N_total_paires, -1)
+ts_validation     = ts_validation.reshape(N_total_paires)
+
+n_batches = N_total_paires // batch_size
 
 # optimiseur
 schedule = optax.cosine_decay_schedule(init_value=3e-4, decay_steps=nb_epoch * n_batches)
@@ -35,7 +59,7 @@ optimizer = optax.chain(
 )
 train_step = make_train_step(optimizer)
 
-PATIENCE = 50   # epochs sans amélioration avant arrêt
+PATIENCE = 50
 
 import os
 if os.path.exists(CHECKPOINT_PATH):
@@ -58,18 +82,20 @@ else:
     best_val = float("inf")
     best_params = params
     epochs_no_improve = 0
-    loss0, _ = loss_fn(params, u0s_training[:batch_size], F_targets_training[:batch_size])
+    loss0, _ = loss_fn(params, u0s_training[:batch_size], u_finals_training[:batch_size], ts_training[:batch_size])
     print(f"[init] loss={loss0:.6f}")
 
 for epoch in range(start_epoch, nb_epoch):
     for i in range(n_batches):
-        u0s_batch = u0s_training[i * batch_size:(i + 1) * batch_size]
-        F_batch   = F_targets_training[i * batch_size:(i + 1) * batch_size]
-        params, opt_state = train_step(params, opt_state, u0s_batch, F_batch)
+        sl = slice(i * batch_size, (i + 1) * batch_size)
+        params, opt_state = train_step(
+            params, opt_state,
+            u0s_training[sl], u_finals_training[sl], ts_training[sl]
+        )
 
     if epoch % 10 == 0:
-        loss_train, _ = loss_fn(params, u0s_training, F_targets_training)
-        loss_val,   _ = loss_fn(params, u0s_validation, F_targets_validation)
+        loss_train, _ = loss_fn(params, u0s_training, u_finals_training, ts_training)
+        loss_val,   _ = loss_fn(params, u0s_validation, u_finals_validation, ts_validation)
 
         improved = loss_val < best_val
         if improved:

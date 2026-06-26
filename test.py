@@ -10,15 +10,14 @@ from loss import model, predict_F
 
 with open("params.pkl", "rb") as f:
     params = pickle.load(f)
-    
+
 import matplotlib.pyplot as plt
 
-# test sur un créneau
-# u0_creneau = jnp.where(x < 0.5, 0.0, 1.0)
-u0_creneau = jnp.sin(2* jnp.pi * x)
-u0_creneau_original = u0_creneau  # sauvegarde avant la boucle
+u0_creneau = jnp.where(x < 0.5, 0.0, 1.0)
+# u0_creneau = jnp.sin(2* jnp.pi * x)
+u0_creneau_original = u0_creneau
 multiple_steps = 1
-#timer
+
 t0 = time.perf_counter()
 u_creneau, _, t_final = solver(u0_creneau, n_steps*multiple_steps)
 jax.block_until_ready(u_creneau)
@@ -29,7 +28,7 @@ dx = x[1] - x[0]
 
 def step(u, _):
     F = predict_F(params, u)
-    u_next = u - (t_final)/dx * (F - jnp.roll(F, 1, axis=0))
+    u_next = u - (t_final/multiple_steps)/dx * (F - jnp.roll(F, 1, axis=0))
     return u_next, None
 
 t2 = time.perf_counter()

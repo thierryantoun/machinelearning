@@ -1,9 +1,9 @@
 import jax.numpy as jnp
 
-SOLVER = "burgers"  # "advection" ou "burgers"
+SOLVER = "burgers"
 
-N = 20000
-n = 32
+N = 5000
+n = 128
 T = 0.5
 K = 16
 cfl = 0.5

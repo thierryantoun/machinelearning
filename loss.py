@@ -15,13 +15,9 @@ def identity(x):
     return x
 
 
-model = FNO1D(kmax=16, activation=nn.gelu, init_fn=nn.initializers.lecun_normal(), dv=64)
+model = FNO1D(kmax=32, activation=nn.gelu, init_fn=nn.initializers.lecun_normal(), dv=64)
 
-@jax.jit
-def lossfn(F, F_cible):
-    erreur = jnp.sqrt(jnp.sum((F - F_cible) ** 2, axis=1) + 1e-12)
-    norme  = jnp.sqrt(jnp.sum(F_cible ** 2, axis=1) + 1e-12)
-    return jnp.mean(erreur / norme)
+dx = x[1] - x[0]
 
 
 def predict_F(params, u0):
@@ -35,16 +31,19 @@ def predict_F(params, u0):
     return consistance + N - N_mean
 
 
-def loss_fn(params, u0s_batch, F_batch):
-    F_total = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    loss_main = lossfn(F_total, F_batch)
-    return loss_main, {"loss_main": loss_main}
+def loss_fn(params, u0s_batch, u_finals_batch, T_batch):
+    F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
+    u_pred = u0s_batch - (T_batch[:, None] / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    erreur = jnp.sqrt(jnp.sum((u_pred - u_finals_batch) ** 2, axis=1) + 1e-12)
+    norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
+    loss = jnp.mean(erreur / norme)
+    return loss, {"loss": loss}
 
 
 def make_train_step(optimizer):
     @jax.jit
-    def train_step(params, opt_state, u0s_batch, F_batch):
-        grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, F_batch)
+    def train_step(params, opt_state, u0s_batch, u_finals_batch, T_batch):
+        grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch, T_batch)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, new_opt_state
