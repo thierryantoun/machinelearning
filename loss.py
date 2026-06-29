@@ -30,7 +30,7 @@ def predict_F(params, u0):
         consistance = mean_u0**2 / 2.0
     return consistance + N - N_mean
 
-
+@jax.jit
 def loss_fn(params, u0s_batch, u_finals_batch, T_batch):
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
     u_pred = u0s_batch - (T_batch[:, None] / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))

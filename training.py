@@ -1,3 +1,6 @@
+import os
+os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
+
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -7,6 +10,7 @@ from functools import partial
 from network_parameters import N, batch_size, nb_epoch, x, SOLVER
 from initial_data import generate_initial_data
 from loss import model, loss_fn, make_train_step
+
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver, n_steps
@@ -87,8 +91,15 @@ for epoch in range(start_epoch, nb_epoch):
         )
 
     if epoch % 10 == 0:
-        loss_train, _ = loss_fn(params, u0s_training, u_finals_training, ts_training)
-        loss_val,   _ = loss_fn(params, u0s_validation, u_finals_validation, ts_validation)
+    # Évaluation par batches au lieu du dataset complet
+        loss_train = sum(loss_fn(params, u0s_training[i*batch_size:(i+1)*batch_size],
+                                u_finals_training[i*batch_size:(i+1)*batch_size],
+                                ts_training[i*batch_size:(i+1)*batch_size])[0]
+                        for i in range(n_batches)) / n_batches
+        loss_val = sum(loss_fn(params, u0s_validation[i*batch_size:(i+1)*batch_size],
+                            u_finals_validation[i*batch_size:(i+1)*batch_size],
+                            ts_validation[i*batch_size:(i+1)*batch_size])[0]
+                    for i in range(N_VAL // batch_size)) / (N_VAL // batch_size)
 
         improved = loss_val < best_val
         if improved:
