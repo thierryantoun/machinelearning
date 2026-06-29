@@ -12,6 +12,8 @@ if SOLVER == "advection":
     from advection_solver import advection_solver as _solver, n_steps
 else:
     from burgers_solver import burgers_solver as _solver, n_steps
+    
+print(jax.devices())
 
 CHECKPOINT_PATH = "checkpoint.pkl"
 
