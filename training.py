@@ -20,39 +20,28 @@ key_init, key_train, key_val = random.split(key, 3)
 
 _solver = partial(_solver, n_steps=n_steps)
 
+N_TRAIN = 5000
+N_VAL   = 1000
 
-N_TRAJ   = 50 # nombre de trajectoires
-N_CHUNKS = 100 # nombre de paires (u0, F) par trajectoire
-
-
-def generate_trajectory(key):
-    "Une trajectoire de N_CHUNKS * n_steps pas."
+def generate_sample(key):
     u0 = generate_initial_data(key)
+    u_final, _, t = _solver(u0)
+    return u0, u_final, t
 
-    def run_chunk(u, _):
-        u_final, _, t = _solver(u)
-        return u_final, (u, u_final, t)
+u0s_training, u_finals_training, ts_training = jax.vmap(generate_sample)(random.split(key_train, N_TRAIN))
+u0s_validation, u_finals_validation, ts_validation = jax.vmap(generate_sample)(random.split(key_val, N_VAL))
 
-    _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=N_CHUNKS)
-    return u0s, u_finals, ts
-
-
-N_total_paires = N_TRAJ * N_CHUNKS
-
-u0s_training, u_finals_training, ts_training = jax.vmap(generate_trajectory)(random.split(key_train, N_TRAJ))
-u0s_training    = u0s_training.reshape(N_total_paires, -1)
-u_finals_training = u_finals_training.reshape(N_total_paires, -1)
-ts_training     = ts_training.reshape(N_total_paires)
-
-u0s_validation, u_finals_validation, ts_validation = jax.vmap(generate_trajectory)(random.split(key_val, N_TRAJ))
-u0s_validation    = u0s_validation.reshape(N_total_paires, -1)
-u_finals_validation = u_finals_validation.reshape(N_total_paires, -1)
-ts_validation     = ts_validation.reshape(N_total_paires)
-
-n_batches = N_total_paires // batch_size
+n_batches = N_TRAIN // batch_size
 
 # optimiseur
-schedule = optax.cosine_decay_schedule(init_value=3e-4, decay_steps=nb_epoch * n_batches)
+schedule = optax.warmup_cosine_decay_schedule(
+    init_value=0.0,
+    peak_value=1e-4,
+    warmup_steps=5 * n_batches,
+    decay_steps=nb_epoch * n_batches,
+    end_value=1e-6,
+)
+
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adam(learning_rate=schedule),
@@ -86,11 +75,13 @@ else:
     print(f"[init] loss={loss0:.6f}")
 
 for epoch in range(start_epoch, nb_epoch):
+    key_train, subkey = random.split(key_train)
+    perm = random.permutation(subkey, N_TRAIN)
     for i in range(n_batches):
-        sl = slice(i * batch_size, (i + 1) * batch_size)
+        idx = perm[i * batch_size : (i + 1) * batch_size]
         params, opt_state = train_step(
             params, opt_state,
-            u0s_training[sl], u_finals_training[sl], ts_training[sl]
+            u0s_training[idx], u_finals_training[idx], ts_training[idx]
         )
 
     if epoch % 10 == 0:

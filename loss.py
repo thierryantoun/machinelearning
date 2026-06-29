@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import optax
 from flax import linen as nn
 from network import FNO1D
-from network_parameters import x, a, cfl, SOLVER
+from network_parameters import x, a, cfl, SOLVER, K
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver, n_steps
@@ -15,7 +15,7 @@ def identity(x):
     return x
 
 
-model = FNO1D(kmax=32, activation=nn.gelu, init_fn=nn.initializers.lecun_normal(), dv=64)
+model = FNO1D(kmax=K, activation=nn.gelu, init_fn=nn.initializers.lecun_normal(), dv=64)
 
 dx = x[1] - x[0]
 

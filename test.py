@@ -13,10 +13,10 @@ with open("params.pkl", "rb") as f:
 
 import matplotlib.pyplot as plt
 
-u0_creneau = jnp.where(x < 0.5, 0.0, 1.0)
-# u0_creneau = jnp.sin(2* jnp.pi * x)
+# u0_creneau = jnp.where(x < 0.5, 0.0, 1.0)
+u0_creneau = jnp.sin(2* jnp.pi * x)
 u0_creneau_original = u0_creneau
-multiple_steps = 1
+multiple_steps = 100
 
 t0 = time.perf_counter()
 u_creneau, _, t_final = solver(u0_creneau, n_steps*multiple_steps)
@@ -49,6 +49,6 @@ plt.xlabel('x')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig("test_creneau_50.png", dpi=150)
+plt.savefig("test_creneau_1000.png", dpi=150)
 plt.show()
-print("Figure sauvegardée : test_creneau.png")
+print("Figure sauvegardée : test_creneau_nsteps1.png")
