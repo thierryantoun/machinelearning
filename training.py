@@ -26,8 +26,8 @@ key_init, key_train, key_val = random.split(key, 3)
 
 _solver = partial(_solver, n_steps=n_steps)
 
-N_TRAIN = 5000
-N_VAL   = 1000
+N_TRAIN = N
+N_VAL   = N // 5
 
 def generate_sample(key):
     u0 = generate_initial_data(key)
@@ -48,20 +48,28 @@ schedule = optax.warmup_cosine_decay_schedule(
     end_value=1e-6,
 )
 
-optimizer = optax.chain(
-    optax.clip_by_global_norm(1.0),
-    optax.adam(learning_rate=schedule),
-)
+RESUME_LR    = None   # LR fixe à la reprise ; None = continuer le cosine schedule
+WEIGHT_DECAY = 1e-3
+
+if RESUME_LR is not None and os.path.exists(CHECKPOINT_PATH):
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(learning_rate=RESUME_LR, weight_decay=WEIGHT_DECAY)
+    )
+else:
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(learning_rate=schedule, weight_decay=WEIGHT_DECAY)
+    )
 train_step = make_train_step(optimizer)
 
 PATIENCE = 50
 
-import os
 if os.path.exists(CHECKPOINT_PATH):
     with open(CHECKPOINT_PATH, "rb") as f:
         ckpt = pickle.load(f)
     params        = ckpt["params"]
-    opt_state     = ckpt["opt_state"]
+    opt_state     = optimizer.init(params)
     start_epoch   = ckpt["epoch"] + 1
     losses_training   = ckpt["losses_training"]
     losses_validation = ckpt["losses_validation"]

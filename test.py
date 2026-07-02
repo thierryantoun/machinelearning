@@ -1,54 +1,64 @@
 import pickle
 import time
+from functools import partial
+
 import jax
 import jax.numpy as jnp
-from jax import random
+import matplotlib.pyplot as plt
 
-from network_parameters import K, x, n_steps, solver
-from initial_data import generate_initial_data
-from loss import model, predict_F
+from network_parameters import K, x, n_steps, cfl, SOLVER
+from loss import predict_F
+
+if SOLVER == "advection":
+    from advection_solver import advection_solver as _active_solver
+else:
+    from burgers_solver import burgers_solver as _active_solver
+
+solver = partial(_active_solver, n_steps=n_steps)
+
+dx = x[1] - x[0]
 
 with open("params.pkl", "rb") as f:
     params = pickle.load(f)
 
-import matplotlib.pyplot as plt
-
-# u0_creneau = jnp.where(x < 0.5, 0.0, 1.0)
-u0_creneau = jnp.sin(2* jnp.pi * x)
+u0_creneau          = jnp.where(x < 0.5, 0.0, 1.0)
 u0_creneau_original = u0_creneau
-multiple_steps = 100
+multiple_steps      = 100
 
+# Solveur : tourne en blocs de n_steps pour récupérer le t réel de chaque bloc
 t0 = time.perf_counter()
-u_creneau, _, t_final = solver(u0_creneau, n_steps*multiple_steps)
+def solver_block(u, _):
+    u_next, _, t = solver(u)
+    return u_next, t
+u_creneau, t_blocks = jax.lax.scan(solver_block, u0_creneau, None, length=multiple_steps)
 jax.block_until_ready(u_creneau)
 t1 = time.perf_counter()
-print(f"Temps d'exécution du solveur d'advection pour {multiple_steps*n_steps} étapes : {t1 - t0:.4f} s")
+print(f"Temps solveur pour {multiple_steps * n_steps} étapes : {t1 - t0:.4f} s")
 
-dx = x[1] - x[0]
-
-def step(u, _):
-    F = predict_F(params, u)
-    u_next = u - (t_final/multiple_steps)/dx * (F - jnp.roll(F, 1, axis=0))
+# Modèle : utilise les mêmes t_blocks que le solveur
+def step(u, t_block):
+    F      = predict_F(params, u)
+    u_next = u - t_block / dx * (F - jnp.roll(F, 1, axis=0))
     return u_next, None
 
 t2 = time.perf_counter()
-u_pred_creneau, _ = jax.lax.scan(step, u0_creneau, None, length=multiple_steps)
+u_pred_creneau, _ = jax.lax.scan(step, u0_creneau, t_blocks)
 jax.block_until_ready(u_pred_creneau)
 t3 = time.perf_counter()
-print(f"Temps d'exécution du modèle pour {multiple_steps*n_steps} étapes : {t3 - t2:.4f} s")
+print(f"Temps modèle pour {multiple_steps * n_steps} étapes : {t3 - t2:.4f} s")
 
 mse = jnp.mean((u_pred_creneau - u_creneau) ** 2)
-print(f"[Créneau 0→1]                        MSE = {float(mse):.6f}")
+print(f"[Créneau 0→1] MSE = {float(mse):.6f}")
 
 plt.figure()
 plt.plot(x, u0_creneau_original, label='u₀',    linestyle='--', alpha=0.5)
-plt.plot(x, u_creneau, label='cible',  linewidth=1.5)
-plt.plot(x, u_pred_creneau,  label='prédit', linewidth=1.5, linestyle=':')
-plt.title("sin(2pix)")
+plt.plot(x, u_creneau,           label='cible',  linewidth=1.5)
+plt.plot(x, u_pred_creneau,      label='prédit', linewidth=1.5, linestyle=':')
+plt.title("Créneau")
 plt.xlabel('x')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig("test_creneau_1000.png", dpi=150)
+plt.savefig("test_creneau_final.png", dpi=150)
 plt.show()
-print("Figure sauvegardée : test_creneau_nsteps1.png")
+print("Figure sauvegardée : test_creneau_final.png")

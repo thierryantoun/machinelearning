@@ -1,20 +1,19 @@
 import jax.numpy as jnp
 
-SOLVER = "burgers"
+SOLVER = "burgers"   # "advection" ou "burgers"
 
-K = 30
-
-N = 5000
-n = 128
-T = 0.5
-cfl = 0.5
-a = 1.0
-x = jnp.linspace(0, 1, n, endpoint=False)
-n_steps = 10
+K          = 80
+N          = 20000
+n          = 512
+T          = 0.5
+cfl        = 0.5
+a          = 1.0      # vitesse pour l'advection
+x          = jnp.linspace(0, 1, n, endpoint=False)
+n_steps    = 50
 
 batch_size = 128
-nb_epoch = 1000
-n_batches = N // batch_size
+nb_epoch   = 1000
+n_batches  = N // batch_size
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as solver
