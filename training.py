@@ -7,7 +7,7 @@ from jax import random
 import optax
 import pickle
 from functools import partial
-from network_parameters import N, batch_size, nb_epoch, x, SOLVER
+from network_parameters import N_RANDOM, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER
 from initial_data import generate_initial_data
 from loss import model, loss_fn, make_train_step
 
@@ -26,17 +26,34 @@ key_init, key_train, key_val = random.split(key, 3)
 
 _solver = partial(_solver, n_steps=n_steps)
 
-N_TRAIN = N
-N_VAL   = N // 5
+N_VAL = N_RANDOM // 5
 
 def generate_sample(key):
     u0 = generate_initial_data(key)
     u_final, _, t = _solver(u0)
     return u0, u_final, t
 
-u0s_training, u_finals_training, ts_training = jax.vmap(generate_sample)(random.split(key_train, N_TRAIN))
+def generate_trajectory(key):
+    "Trajectoire de n_steps*MULTIPLE_STEPS pas, coupée en paires (u_{k*n_steps}, u_{(k+1)*n_steps})."
+    u0 = generate_initial_data(key)
+
+    def run_chunk(u, _):
+        u_next, _, t = _solver(u)
+        return u_next, (u, u_next, t)
+
+    _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
+    return u0s, u_finals, ts
+
+u0s_training, u_finals_training, ts_training = jax.vmap(generate_sample)(random.split(key_train, N_RANDOM))
 u0s_validation, u_finals_validation, ts_validation = jax.vmap(generate_sample)(random.split(key_val, N_VAL))
 
+key_train, key_traj = random.split(key_train)
+u0s_traj, u_finals_traj, ts_traj = jax.vmap(generate_trajectory)(random.split(key_traj, N_TRAJ))
+u0s_training      = jnp.concatenate([u0s_training,      u0s_traj.reshape(-1, x.shape[0])], axis=0)
+u_finals_training = jnp.concatenate([u_finals_training, u_finals_traj.reshape(-1, x.shape[0])], axis=0)
+ts_training       = jnp.concatenate([ts_training,       ts_traj.reshape(-1)], axis=0)
+
+assert u0s_training.shape[0] == N_TRAIN
 n_batches = N_TRAIN // batch_size
 
 # optimiseur
