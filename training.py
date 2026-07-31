@@ -7,7 +7,7 @@ from jax import random
 import optax
 import pickle
 from functools import partial
-from network_parameters import N_RANDOM, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER
+from network_parameters import MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER
 from initial_data import generate_initial_data
 from loss import model, loss_fn, make_train_step
 
@@ -16,22 +16,20 @@ if SOLVER == "advection":
     from advection_solver import advection_solver as _solver, n_steps
 else:
     from burgers_solver import burgers_solver as _solver, n_steps
-    
-print(jax.devices())
 
-CHECKPOINT_PATH = "checkpoint.pkl"
+print(jax.devices())
+print(f"Modèle : {MODEL}")
+
+CHECKPOINT_PATH = f"checkpoint_{MODEL}.pkl"
+PARAMS_PATH     = f"params_{MODEL}.pkl"
 
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)
 
 _solver = partial(_solver, n_steps=n_steps)
 
-N_VAL = N_RANDOM // 5
-
-def generate_sample(key):
-    u0 = generate_initial_data(key)
-    u_final, _, t = _solver(u0)
-    return u0, u_final, t
+N_VAL_TRAJ = max(1, N_TRAJ // 5)
+N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
 
 def generate_trajectory(key):
     "Trajectoire de n_steps*MULTIPLE_STEPS pas, coupée en paires (u_{k*n_steps}, u_{(k+1)*n_steps})."
@@ -44,17 +42,21 @@ def generate_trajectory(key):
     _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
     return u0s, u_finals, ts
 
-u0s_training, u_finals_training, ts_training = jax.vmap(generate_sample)(random.split(key_train, N_RANDOM))
-u0s_validation, u_finals_validation, ts_validation = jax.vmap(generate_sample)(random.split(key_val, N_VAL))
+key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
 
-key_train, key_traj = random.split(key_train)
-u0s_traj, u_finals_traj, ts_traj = jax.vmap(generate_trajectory)(random.split(key_traj, N_TRAJ))
-u0s_training      = jnp.concatenate([u0s_training,      u0s_traj.reshape(-1, x.shape[0])], axis=0)
-u_finals_training = jnp.concatenate([u_finals_training, u_finals_traj.reshape(-1, x.shape[0])], axis=0)
-ts_training       = jnp.concatenate([ts_training,       ts_traj.reshape(-1)], axis=0)
+u0s_traj, u_finals_traj, ts_traj = jax.vmap(generate_trajectory)(random.split(key_traj_train, N_TRAJ))
+u0s_training      = u0s_traj.reshape(-1, x.shape[0])
+u_finals_training = u_finals_traj.reshape(-1, x.shape[0])
+ts_training       = ts_traj.reshape(-1)
+
+u0s_traj_val, u_finals_traj_val, ts_traj_val = jax.vmap(generate_trajectory)(random.split(key_traj_val, N_VAL_TRAJ))
+u0s_validation      = u0s_traj_val.reshape(-1, x.shape[0])
+u_finals_validation = u_finals_traj_val.reshape(-1, x.shape[0])
+ts_validation       = ts_traj_val.reshape(-1)
 
 assert u0s_training.shape[0] == N_TRAIN
-n_batches = N_TRAIN // batch_size
+n_batches     = max(1, N_TRAIN // batch_size)
+n_batches_val = max(1, N_VAL // batch_size)
 
 # optimiseur
 schedule = optax.warmup_cosine_decay_schedule(
@@ -81,6 +83,20 @@ else:
 train_step = make_train_step(optimizer)
 
 PATIENCE = 50
+
+
+def eval_losses(params, u0s, u_finals, ts, n_batches_eval):
+    "Moyenne des métriques de loss_fn (dict aux) sur n_batches_eval batches."
+    totals = None
+    for i in range(n_batches_eval):
+        sl = slice(i * batch_size, (i + 1) * batch_size)
+        _, aux = loss_fn(params, u0s[sl], u_finals[sl], ts[sl])
+        if totals is None:
+            totals = {k: 0.0 for k in aux}
+        for k, v in aux.items():
+            totals[k] += v
+    return {k: v / n_batches_eval for k, v in totals.items()}
+
 
 if os.path.exists(CHECKPOINT_PATH):
     with open(CHECKPOINT_PATH, "rb") as f:
@@ -116,15 +132,11 @@ for epoch in range(start_epoch, nb_epoch):
         )
 
     if epoch % 10 == 0:
-    # Évaluation par batches au lieu du dataset complet
-        loss_train = sum(loss_fn(params, u0s_training[i*batch_size:(i+1)*batch_size],
-                                u_finals_training[i*batch_size:(i+1)*batch_size],
-                                ts_training[i*batch_size:(i+1)*batch_size])[0]
-                        for i in range(n_batches)) / n_batches
-        loss_val = sum(loss_fn(params, u0s_validation[i*batch_size:(i+1)*batch_size],
-                            u_finals_validation[i*batch_size:(i+1)*batch_size],
-                            ts_validation[i*batch_size:(i+1)*batch_size])[0]
-                    for i in range(N_VAL // batch_size)) / (N_VAL // batch_size)
+        # Évaluation par batches au lieu du dataset complet
+        metrics_train = eval_losses(params, u0s_training, u_finals_training, ts_training, n_batches)
+        metrics_val   = eval_losses(params, u0s_validation, u_finals_validation, ts_validation, n_batches_val)
+        loss_train = metrics_train["loss"]
+        loss_val   = metrics_val["loss"]
 
         improved = loss_val < best_val
         if improved:
@@ -134,8 +146,11 @@ for epoch in range(start_epoch, nb_epoch):
         else:
             epochs_no_improve += 10
 
+        detail_train = " ".join(f"{k}={v:.6f}" for k, v in metrics_train.items() if k != "loss")
+        detail_val   = " ".join(f"{k}={v:.6f}" for k, v in metrics_val.items() if k != "loss")
         marker = " *" if improved else ""
-        print(f"Epoch {epoch} | Train: {loss_train:.6f} | Val: {loss_val:.6f}{marker}")
+        print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
+              f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker}")
         losses_training.append(float(loss_train))
         losses_validation.append(float(loss_val))
 
@@ -160,6 +175,6 @@ for epoch in range(start_epoch, nb_epoch):
             print(f"Early stopping à l'epoch {epoch} (pas d'amélioration depuis {PATIENCE} epochs). Meilleure val: {best_val:.6f}")
             break
 
-with open("params.pkl", "wb") as f:
+with open(PARAMS_PATH, "wb") as f:
     pickle.dump(best_params, f)
-print("Params sauvegardés dans params.pkl")
+print(f"Params sauvegardés dans {PARAMS_PATH}")

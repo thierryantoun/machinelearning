@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from network_parameters import K, x, n_steps, cfl, SOLVER
+from network_parameters import MODEL, K, x, n_steps, cfl, SOLVER
 from loss import predict_F
 
 if SOLVER == "advection":
@@ -18,7 +18,9 @@ solver = partial(_active_solver, n_steps=n_steps)
 
 dx = x[1] - x[0]
 
-with open("params.pkl", "rb") as f:
+PARAMS_PATH = f"params_{MODEL}.pkl"
+
+with open(PARAMS_PATH, "rb") as f:
     params = pickle.load(f)
 
 u0_creneau          = jnp.where(x < 0.5, 0.0, 1.0)
@@ -54,11 +56,12 @@ plt.figure()
 plt.plot(x, u0_creneau_original, label='u₀',    linestyle='--', alpha=0.5)
 plt.plot(x, u_creneau,           label='cible',  linewidth=1.5)
 plt.plot(x, u_pred_creneau,      label='prédit', linewidth=1.5, linestyle=':')
-plt.title("Créneau")
+plt.title(f"Créneau ({MODEL})")
 plt.xlabel('x')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig("test_creneau_final.png", dpi=150)
+plot_path = f"test_creneau_final_{MODEL}.png"
+plt.savefig(plot_path, dpi=150)
 plt.show()
-print("Figure sauvegardée : test_creneau_final.png")
+print(f"Figure sauvegardée : {plot_path}")

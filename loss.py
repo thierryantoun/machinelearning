@@ -1,21 +1,13 @@
 import jax
 import jax.numpy as jnp
 import optax
-from flax import linen as nn
-from network import FNO1D
-from network_parameters import x, a, cfl, SOLVER, K
+from network import model
+from network_parameters import x, a, cfl, SOLVER, MODEL, n
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver, n_steps
 else:
     from burgers_solver import burgers_solver as _solver, n_steps
-
-
-def identity(x):
-    return x
-
-
-model = FNO1D(kmax=K, activation=nn.gelu, init_fn=nn.initializers.lecun_normal(), dv=64)
 
 dx = x[1] - x[0]
 
@@ -30,14 +22,37 @@ def predict_F(params, u0):
         consistance = mean_u0**2 / 2.0
     return consistance + N - N_mean
 
-@jax.jit
-def loss_fn(params, u0s_batch, u_finals_batch, T_batch):
+
+def _loss_fno(params, u0s_batch, u_finals_batch, T_batch):
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
     u_pred = u0s_batch - (T_batch[:, None] / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
     erreur = jnp.sqrt(jnp.sum((u_pred - u_finals_batch) ** 2, axis=1) + 1e-12)
     norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
     loss = jnp.mean(erreur / norme)
     return loss, {"loss": loss}
+
+
+kappa     = 0.5
+Ktot      = n // 2 + 1
+k0        = int(kappa * Ktot)
+lambda_hf = 0.0
+
+
+def _loss_lgno(params, u0s_batch, u_finals_batch, T_batch):
+    F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
+    u_pred = u0s_batch - (T_batch[:, None] / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    erreur = u_pred - u_finals_batch
+    loss_phys = jnp.mean(jnp.sum(jnp.abs(erreur), axis=1) / n)
+
+    e_hat   = jnp.fft.rfft(erreur, axis=-1)
+    e_hf    = e_hat[:, k0:Ktot]
+    loss_hf = 1 / (Ktot - k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
+
+    loss = loss_phys + lambda_hf * loss_hf
+    return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
+
+
+loss_fn = jax.jit(_loss_fno if MODEL == "fno" else _loss_lgno)
 
 
 def make_train_step(optimizer):
