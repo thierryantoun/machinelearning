@@ -23,6 +23,15 @@ print(f"Modèle : {MODEL}")
 CHECKPOINT_PATH = f"checkpoint_{MODEL}.pkl"
 PARAMS_PATH     = f"params_{MODEL}.pkl"
 
+# ------------------------------------------------------------------
+# À METTRE À True À CHAQUE CHANGEMENT DE STAGE (MULTIPLE_STEPS, lambda_hf, K, etc.)
+# La loss n'est alors plus comparable au stage précédent : on repart d'un
+# best_val vierge pour ne pas bloquer la sauvegarde / déclencher un early
+# stopping prématuré sur une métrique qui n'a plus le même sens.
+# Remettre à False si on reprend un stage déjà entamé sans rien changer.
+# ------------------------------------------------------------------
+NEW_STAGE = True
+
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)
 
@@ -106,10 +115,17 @@ if os.path.exists(CHECKPOINT_PATH):
     start_epoch   = ckpt["epoch"] + 1
     losses_training   = ckpt["losses_training"]
     losses_validation = ckpt["losses_validation"]
-    best_val      = ckpt["best_val"]
     best_params   = ckpt["best_params"]
-    epochs_no_improve = ckpt["epochs_no_improve"]
-    print(f"Reprise depuis l'epoch {start_epoch} (meilleure val: {best_val:.6f})")
+
+    if NEW_STAGE:
+        best_val          = float("inf")
+        epochs_no_improve = 0
+        print(f"Reprise depuis l'epoch {start_epoch} — NOUVEAU STAGE : "
+              f"best_val et epochs_no_improve réinitialisés (ancien best_val: {ckpt['best_val']:.6f})")
+    else:
+        best_val          = ckpt["best_val"]
+        epochs_no_improve = ckpt["epochs_no_improve"]
+        print(f"Reprise depuis l'epoch {start_epoch} (meilleure val: {best_val:.6f})")
 else:
     params = model.init(key_init, jnp.ones(x.shape[0]))
     opt_state = optimizer.init(params)
