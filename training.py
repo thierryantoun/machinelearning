@@ -7,7 +7,7 @@ from jax import random
 import optax
 import pickle
 from functools import partial
-from network_parameters import MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER
+from network_parameters import MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE
 from initial_data import generate_initial_data
 from loss import model, loss_fn, make_train_step
 
@@ -22,15 +22,6 @@ print(f"Modèle : {MODEL}")
 
 CHECKPOINT_PATH = f"checkpoint_{MODEL}.pkl"
 PARAMS_PATH     = f"params_{MODEL}.pkl"
-
-# ------------------------------------------------------------------
-# À METTRE À True À CHAQUE CHANGEMENT DE STAGE (MULTIPLE_STEPS, lambda_hf, K, etc.)
-# La loss n'est alors plus comparable au stage précédent : on repart d'un
-# best_val vierge pour ne pas bloquer la sauvegarde / déclencher un early
-# stopping prématuré sur une métrique qui n'a plus le même sens.
-# Remettre à False si on reprend un stage déjà entamé sans rien changer.
-# ------------------------------------------------------------------
-NEW_STAGE = True
 
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)

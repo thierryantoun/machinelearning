@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from network_parameters import MODEL, K, x, n_steps, cfl, SOLVER
+from network_parameters import x, n_steps, SOLVER
 from loss import predict_F
 
 if SOLVER == "advection":
@@ -18,16 +18,15 @@ solver = partial(_active_solver, n_steps=n_steps)
 
 dx = x[1] - x[0]
 
-PARAMS_PATH = f"params_{MODEL}.pkl"
-
-with open(PARAMS_PATH, "rb") as f:
+with open("params_lgno.pkl", "rb") as f:
     params = pickle.load(f)
 
-u0_creneau          = jnp.where(x < 0.5, 0.0, 1.0)
+# u0_creneau          = jnp.where(x < 0.5, 0.0, 1.0)
+# u0_creneau          = generate_initial_data(random.PRNGKey(42))
+u0_creneau = jnp.sin(2*jnp.pi*x)
 u0_creneau_original = u0_creneau
-multiple_steps      = 100
+multiple_steps      = 8
 
-# Solveur : tourne en blocs de n_steps pour récupérer le t réel de chaque bloc
 t0 = time.perf_counter()
 def solver_block(u, _):
     u_next, _, t = solver(u)
@@ -37,17 +36,20 @@ jax.block_until_ready(u_creneau)
 t1 = time.perf_counter()
 print(f"Temps solveur pour {multiple_steps * n_steps} étapes : {t1 - t0:.4f} s")
 
-# Modèle : utilise les mêmes t_blocks que le solveur
+
 def step(u, t_block):
     F      = predict_F(params, u)
     u_next = u - t_block / dx * (F - jnp.roll(F, 1, axis=0))
     return u_next, None
+
 
 t2 = time.perf_counter()
 u_pred_creneau, _ = jax.lax.scan(step, u0_creneau, t_blocks)
 jax.block_until_ready(u_pred_creneau)
 t3 = time.perf_counter()
 print(f"Temps modèle pour {multiple_steps * n_steps} étapes : {t3 - t2:.4f} s")
+
+print("quotient temps schéma / temps modele:", (t1-t0)/(t3-t2))
 
 mse = jnp.mean((u_pred_creneau - u_creneau) ** 2)
 print(f"[Créneau 0→1] MSE = {float(mse):.6f}")
@@ -56,12 +58,11 @@ plt.figure()
 plt.plot(x, u0_creneau_original, label='u₀',    linestyle='--', alpha=0.5)
 plt.plot(x, u_creneau,           label='cible',  linewidth=1.5)
 plt.plot(x, u_pred_creneau,      label='prédit', linewidth=1.5, linestyle=':')
-plt.title(f"Créneau ({MODEL})")
+plt.title("sin(2*pi*x)")
 plt.xlabel('x')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plot_path = f"test_creneau_final_{MODEL}.png"
-plt.savefig(plot_path, dpi=150)
+plt.savefig("sin1.png", dpi=150)
 plt.show()
-print(f"Figure sauvegardée : {plot_path}")
+print("Figure sauvegardée : test_creneau_final.png")
