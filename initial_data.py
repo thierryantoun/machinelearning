@@ -15,7 +15,7 @@ def make_sinus_u0(key):
 
 def generate_initial_data(key, nb_frequences=K, x=x):
     key, subkey = random.split(key)
-    ic_type = random.randint(subkey, (), 0, 4)  # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante
+    ic_type = random.randint(subkey, (), 0, 5)  # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe
 
     key, subkey = random.split(key)
 
@@ -27,7 +27,6 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         return jnp.sum(a_k[:, None] * jnp.sin(2*jnp.pi*ks[:, None]*x[None, :] + phase_k[:, None]), axis=0)
 
     def make_gaussiennes(subkey):
-        # somme de gaussiennes aléatoires
         n_gaussians = 4
         k1, k2, k3 = random.split(subkey, 3)
         centers = random.uniform(k1, (n_gaussians,), minval=0.0, maxval=1.0)
@@ -36,23 +35,29 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         return jnp.sum(amps[:, None] * jnp.exp(-((x[None, :] - centers[:, None])**2) / (2 * widths[:, None]**2)), axis=0)
 
     def make_polynomes(subkey):
-        # polynome aléatoire de degré 5 evalué sur [0,1], rendu périodique
         k1, k2 = random.split(subkey)
         degree = 5
         coeffs = random.uniform(k1, (degree+1,), minval=-5.0, maxval=5.0)
         u = jnp.polyval(coeffs, x)
-        # rend périodique en soustrayant la droite reliant u(0) à u(1)
         u = u - (u[-1] - u[0]) * x - u[0]
         return u
-    
+
     def make_constante(subkey):
         c = random.uniform(subkey, (), minval=-5.0, maxval=5.0)
         return jnp.ones_like(x) * c
 
+    def make_rampe(subkey):
+        k1, k2, k3, k4 = random.split(subkey, 4)
+        center    = random.uniform(k1, (), minval=0.0, maxval=1.0)
+        steepness = random.uniform(k2, (), minval=20.0, maxval=400.0)
+        amp       = random.uniform(k3, (), minval=-1.0, maxval=1.0)
+        sign      = jnp.sign(random.uniform(k4, (), minval=-1.0, maxval=1.0))
+        d = x - center
+        d = d - jnp.round(d)
+        return amp * jnp.tanh(sign * steepness * d)
+
     is_constante = (ic_type == 3)
-    u = jax.lax.switch(ic_type, [make_sinus, make_gaussiennes, make_polynomes, make_constante], subkey)
-    # on normalise seulement les signaux non constants (pour les constantes l'amplitude est
-    # l'information utile — la diviser reviendrait à toujours avoir ±1)
+    u = jax.lax.switch(ic_type, [make_sinus, make_gaussiennes, make_polynomes, make_constante, make_rampe], subkey)
     u = jnp.where(is_constante, u, u / jnp.max(jnp.abs(u)))
 
     return u
