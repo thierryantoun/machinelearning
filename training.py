@@ -102,7 +102,20 @@ if os.path.exists(CHECKPOINT_PATH):
     with open(CHECKPOINT_PATH, "rb") as f:
         ckpt = pickle.load(f)
     params        = ckpt["params"]
-    opt_state     = optimizer.init(params)
+
+    # Reprise réelle de l'optimiseur : on NE réinitialise PAS opt_state.
+    # optimizer.init(params) remettait à zéro les moments Adam ET le compteur
+    # de step interne du schedule cosine (stocké dans opt_state) -> le LR
+    # repartait à chaque reprise dans sa phase de warmup au lieu de continuer
+    # la décroissance là où elle s'était arrêtée. C'était la cause du saut
+    # de loss observé juste après chaque reprise.
+    try:
+        opt_state = ckpt["opt_state"]
+    except KeyError:
+        # Filet de sécurité si un vieux checkpoint sans opt_state est rechargé
+        print("⚠️  Pas d'opt_state dans le checkpoint, réinitialisation (reprise à froid).")
+        opt_state = optimizer.init(params)
+
     start_epoch   = ckpt["epoch"] + 1
     losses_training   = ckpt["losses_training"]
     losses_validation = ckpt["losses_validation"]
