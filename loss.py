@@ -39,13 +39,9 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=1) + 1e-12)
     norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
     loss_phys = jnp.mean(erreur / norme)
- 
-    e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
-    e_hf    = e_hat[:, k0:k1_fno]
-    loss_hf = 1 / (k1_fno - k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
- 
-    loss = loss_phys + lambda_hf * loss_hf
-    return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
+
+    loss = loss_phys
+    return loss, {"loss": loss, "loss_phys": loss_phys}
  
  
 def _loss_lgno(params, u0s_batch, u_finals_batch):
