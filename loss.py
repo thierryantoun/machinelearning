@@ -2,12 +2,12 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model
-from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, K
+from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, K, T_target
 
 if SOLVER == "advection":
-    from advection_solver import advection_solver as _solver, n_steps
+    from advection_solver import advection_solver as _solver
 else:
-    from burgers_solver import burgers_solver as _solver, n_steps
+    from burgers_solver import burgers_solver as _solver
 
 dx = x[1] - x[0]
 
@@ -31,9 +31,10 @@ k1_fno    = k_max_fno
 k1_lgno   = Ktot
  
  
-def _loss_fno(params, u0s_batch, u_finals_batch, T_batch):
+def _loss_fno(params, u0s_batch, u_finals_batch):
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    u_pred = u0s_batch - (T_batch[:, None] / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+
     erreur_vec = u_pred - u_finals_batch
     erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=1) + 1e-12)
     norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
@@ -47,9 +48,9 @@ def _loss_fno(params, u0s_batch, u_finals_batch, T_batch):
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
  
  
-def _loss_lgno(params, u0s_batch, u_finals_batch, T_batch):
+def _loss_lgno(params, u0s_batch, u_finals_batch):
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    u_pred = u0s_batch - (T_batch[:, None] / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
     erreur = u_pred - u_finals_batch
     loss_phys = jnp.mean(jnp.sum(jnp.abs(erreur), axis=1) / n)
  
@@ -67,8 +68,8 @@ loss_fn = jax.jit(_loss_fno if MODEL == "fno" else _loss_lgno)
 
 def make_train_step(optimizer):
     @jax.jit
-    def train_step(params, opt_state, u0s_batch, u_finals_batch, T_batch):
-        grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch, T_batch)
+    def train_step(params, opt_state, u0s_batch, u_finals_batch):
+        grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, new_opt_state
