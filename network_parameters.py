@@ -11,7 +11,7 @@ MODEL = _args.model
 
 SOLVER = "burgers"   # "advection" ou "burgers"
 
-K          = 45
+K          = 60
 N_TRAJ         = 10   # nombre de trajectoires longues
 MULTIPLE_STEPS = 20   # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
@@ -20,8 +20,7 @@ T          = 1
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-n_steps    = 10
-
+T_target   = 0.1
 batch_size = 64
 nb_epoch   = 100
 n_batches  = N_TRAIN // batch_size

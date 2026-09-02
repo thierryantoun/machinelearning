@@ -6,19 +6,19 @@ import jax.numpy as jnp
 from jax import random
 import optax
 import pickle
-from functools import partial
-from network_parameters import MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE
+from network_parameters import MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target
 from initial_data import generate_initial_data
 from loss import model, loss_fn, make_train_step
 
-
 if SOLVER == "advection":
-    from advection_solver import advection_solver as _solver, n_steps
+    from advection_solver import advection_solver as _solver
 else:
-    from burgers_solver import burgers_solver as _solver, n_steps
+    from burgers_solver import burgers_solver as _solver
 
 print(jax.devices())
 print(f"Modèle : {MODEL}")
+
+dx = x[1] - x[0]
 
 CHECKPOINT_PATH = f"checkpoint_{MODEL}.pkl"
 PARAMS_PATH     = f"params_{MODEL}.pkl"
@@ -26,28 +26,32 @@ PARAMS_PATH     = f"params_{MODEL}.pkl"
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)
 
-_solver = partial(_solver, n_steps=n_steps)
+# Le solveur prend maintenant T_target (temps physique fixe) au lieu de n_steps.
+# Plus de partial(_solver, n_steps=n_steps) : T_target est passe directement
+# a chaque appel dans generate_trajectory ci-dessous.
 
 N_VAL_TRAJ = max(1, N_TRAJ // 5)
 N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
 
+
 def generate_trajectory(key):
-    "Trajectoire de n_steps*MULTIPLE_STEPS pas, coupée en paires (u_{k*n_steps}, u_{(k+1)*n_steps})."
+    "Trajectoire de MULTIPLE_STEPS blocs, chacun integre sur le meme temps physique T_target."
     u0 = generate_initial_data(key)
 
     def run_chunk(u, _):
-        u_next, _, t = _solver(u)
+        u_next, _, t = _solver(u, T_target)
         return u_next, (u, u_next, t)
 
     _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
     return u0s, u_finals, ts
+
 
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
 
 u0s_traj, u_finals_traj, ts_traj = jax.vmap(generate_trajectory)(random.split(key_traj_train, N_TRAJ))
 u0s_training      = u0s_traj.reshape(-1, x.shape[0])
 u_finals_training = u_finals_traj.reshape(-1, x.shape[0])
-ts_training       = ts_traj.reshape(-1)
+ts_training       = ts_traj.reshape(-1)   # constant = T_target, garde juste pour verification/log
 
 u0s_traj_val, u_finals_traj_val, ts_traj_val = jax.vmap(generate_trajectory)(random.split(key_traj_val, N_VAL_TRAJ))
 u0s_validation      = u0s_traj_val.reshape(-1, x.shape[0])
@@ -59,9 +63,13 @@ assert u0s_training.shape[0] == N_TRAIN
 n_batches     = max(1, N_TRAIN // batch_size)
 n_batches_val = max(1, N_VAL // batch_size)
 
-print(f"T_batch: min={ts_training.min():.4f}, max={ts_training.max():.4f}, mean={ts_training.mean():.4f}")
+# Diagnostic : ts_training doit maintenant etre constant (= T_target partout).
+# On garde le print par securite, pour detecter tout ecart inattendu (bug de
+# generation, T_target mal propage, etc.) plutot que de le supprimer purement.
+print(f"T_batch: min={ts_training.min():.6f}, max={ts_training.max():.6f}, mean={ts_training.mean():.6f} "
+      f"(devrait etre constant = T_target = {T_target})")
 print(f"dx = {dx:.6f}")
-print(f"T/dx (facteur d'amplification): {ts_training.mean()/dx:.2f}")
+print(f"T_target/dx (facteur d'amplification, fixe) : {T_target/dx:.2f}")
 
 # optimiseur
 schedule = optax.warmup_cosine_decay_schedule(
@@ -90,12 +98,12 @@ train_step = make_train_step(optimizer)
 PATIENCE = 50
 
 
-def eval_losses(params, u0s, u_finals, ts, n_batches_eval):
+def eval_losses(params, u0s, u_finals, n_batches_eval):
     "Moyenne des métriques de loss_fn (dict aux) sur n_batches_eval batches."
     totals = None
     for i in range(n_batches_eval):
         sl = slice(i * batch_size, (i + 1) * batch_size)
-        _, aux = loss_fn(params, u0s[sl], u_finals[sl], ts[sl])
+        _, aux = loss_fn(params, u0s[sl], u_finals[sl])
         if totals is None:
             totals = {k: 0.0 for k in aux}
         for k, v in aux.items():
@@ -136,7 +144,7 @@ else:
     best_val = float("inf")
     best_params = params
     epochs_no_improve = 0
-    loss0, _ = loss_fn(params, u0s_training[:batch_size], u_finals_training[:batch_size], ts_training[:batch_size])
+    loss0, _ = loss_fn(params, u0s_training[:batch_size], u_finals_training[:batch_size])
     print(f"[init] loss={loss0:.6f}")
 
 for epoch in range(start_epoch, nb_epoch):
@@ -146,13 +154,13 @@ for epoch in range(start_epoch, nb_epoch):
         idx = perm[i * batch_size : (i + 1) * batch_size]
         params, opt_state = train_step(
             params, opt_state,
-            u0s_training[idx], u_finals_training[idx], ts_training[idx]
+            u0s_training[idx], u_finals_training[idx]
         )
 
     if epoch % 10 == 0:
         # Évaluation par batches au lieu du dataset complet
-        metrics_train = eval_losses(params, u0s_training, u_finals_training, ts_training, n_batches)
-        metrics_val   = eval_losses(params, u0s_validation, u_finals_validation, ts_validation, n_batches_val)
+        metrics_train = eval_losses(params, u0s_training, u_finals_training, n_batches)
+        metrics_val   = eval_losses(params, u0s_validation, u_finals_validation, n_batches_val)
         loss_train = metrics_train["loss"]
         loss_val   = metrics_val["loss"]
 
