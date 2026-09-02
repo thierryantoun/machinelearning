@@ -54,9 +54,14 @@ u0s_validation      = u0s_traj_val.reshape(-1, x.shape[0])
 u_finals_validation = u_finals_traj_val.reshape(-1, x.shape[0])
 ts_validation       = ts_traj_val.reshape(-1)
 
+
 assert u0s_training.shape[0] == N_TRAIN
 n_batches     = max(1, N_TRAIN // batch_size)
 n_batches_val = max(1, N_VAL // batch_size)
+
+print(f"T_batch: min={ts_training.min():.4f}, max={ts_training.max():.4f}, mean={ts_training.mean():.4f}")
+print(f"dx = {dx:.6f}")
+print(f"T/dx (facteur d'amplification): {ts_training.mean()/dx:.2f}")
 
 # optimiseur
 schedule = optax.warmup_cosine_decay_schedule(
@@ -103,16 +108,9 @@ if os.path.exists(CHECKPOINT_PATH):
         ckpt = pickle.load(f)
     params        = ckpt["params"]
 
-    # Reprise réelle de l'optimiseur : on NE réinitialise PAS opt_state.
-    # optimizer.init(params) remettait à zéro les moments Adam ET le compteur
-    # de step interne du schedule cosine (stocké dans opt_state) -> le LR
-    # repartait à chaque reprise dans sa phase de warmup au lieu de continuer
-    # la décroissance là où elle s'était arrêtée. C'était la cause du saut
-    # de loss observé juste après chaque reprise.
     try:
         opt_state = ckpt["opt_state"]
     except KeyError:
-        # Filet de sécurité si un vieux checkpoint sans opt_state est rechargé
         print("⚠️  Pas d'opt_state dans le checkpoint, réinitialisation (reprise à froid).")
         opt_state = optimizer.init(params)
 
