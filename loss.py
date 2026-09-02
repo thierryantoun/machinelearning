@@ -24,9 +24,9 @@ def predict_F(params, u0):
 
 kappa = 0.25
 Ktot  = n // 2 + 1
-k0    = int(kappa * Ktot)
-
 k_max_fno = K
+kappa     = 0.5
+k0        = int(kappa * k_max_fno)   # k0 = 15, bien < k1_fno=30
 k1_fno    = k_max_fno
 k1_lgno   = Ktot
  
