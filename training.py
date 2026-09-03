@@ -6,9 +6,12 @@ import jax.numpy as jnp
 from jax import random
 import optax
 import pickle
-from network_parameters import MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target
+from network_parameters import (
+    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target,
+    ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
+)
 from initial_data import generate_initial_data
-from loss import model, loss_fn, make_train_step
+from loss import model, loss_fn, make_train_step, predict_F
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -44,6 +47,67 @@ def generate_trajectory(key):
 
     _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
     return u0s, u_finals, ts
+
+
+def model_step(params, u):
+    F = predict_F(params, u)
+    return u - (T_target / dx) * (F - jnp.roll(F, 1, axis=-1))
+
+
+@jax.jit
+def generate_onpolicy_pairs(key, params):
+    """Corrige l'exposure bias : on déroule le modèle COURANT (params) depuis
+    des IC fraîches pendant ONPOLICY_MAX_STEPS pas (arrêt de gradient, ce
+    n'est que de la génération de données), puis on interroge le vrai solveur
+    depuis l'état atteint pour obtenir le label correct. Le réseau apprend
+    ainsi à corriger ses propres états dérivés, pas seulement à reproduire des
+    trajectoires toujours "propres".
+
+    Garde-fou NaN/Inf : un modèle instable (surtout en tout début d'entraînement,
+    params quasi aléatoires) peut diverger pendant le déroulé. Un seul NaN dans
+    le batch casserait tous les params au gradient step suivant (le clip de
+    gradient ne protège pas contre NaN, seulement contre les gradients énormes
+    mais finis). Toute paire non-finie est donc remplacée par l'IC propre et
+    son vrai label (garantis finis) avant d'être renvoyée.
+
+    Les ONPOLICY_MAX_STEPS états intermédiaires de chaque trajectoire sont
+    calculés de toute façon (déroulé séquentiel) : on en garde
+    ONPOLICY_DEPTHS_PER_TRAJ par trajectoire (profondeurs tirées au hasard)
+    au lieu d'un seul, ce qui multiplie le nombre de paires sans coût
+    supplémentaire de déroulé (seul le ré-étiquetage par le vrai solveur,
+    qui lui coûte réellement, scale avec ce nombre)."""
+    key_ic, key_depth = random.split(key)
+    ics = jax.vmap(generate_initial_data)(random.split(key_ic, ONPOLICY_TRAJ))
+
+    def rollout_model(u0):
+        def body(u, _):
+            u_next = model_step(params, u)
+            return u_next, u_next
+        _, states = jax.lax.scan(body, u0, None, length=ONPOLICY_MAX_STEPS)
+        return states  # (ONPOLICY_MAX_STEPS, n) : état après 1..ONPOLICY_MAX_STEPS pas modèle
+
+    all_states = jax.vmap(rollout_model)(ics)  # (ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, n)
+    depths = random.randint(key_depth, (ONPOLICY_TRAJ, ONPOLICY_DEPTHS_PER_TRAJ), 0, ONPOLICY_MAX_STEPS)
+    gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps,n),(k,) -> (k,n)
+    u0s_corrupted = jax.lax.stop_gradient(gather_traj(all_states, depths))  # (ONPOLICY_TRAJ, k, n)
+    u0s_corrupted = u0s_corrupted.reshape(-1, u0s_corrupted.shape[-1])      # (ONPOLICY_TRAJ*k, n)
+
+    def relabel(u):
+        u_true_next, _, _ = _solver(u, T_target)
+        return u_true_next
+
+    u_finals_true = jax.vmap(relabel)(u0s_corrupted)
+
+    u_finals_ics_per_traj = jax.vmap(relabel)(ics)                                    # (ONPOLICY_TRAJ, n)
+    ics_flat          = jnp.repeat(ics, ONPOLICY_DEPTHS_PER_TRAJ, axis=0)              # (ONPOLICY_TRAJ*k, n)
+    u_finals_ics_flat = jnp.repeat(u_finals_ics_per_traj, ONPOLICY_DEPTHS_PER_TRAJ, axis=0)
+
+    is_bad = (jnp.any(~jnp.isfinite(u0s_corrupted), axis=-1)
+              | jnp.any(~jnp.isfinite(u_finals_true), axis=-1))
+    u0s_corrupted = jnp.where(is_bad[:, None], ics_flat, u0s_corrupted)
+    u_finals_true = jnp.where(is_bad[:, None], u_finals_ics_flat, u_finals_true)
+
+    return u0s_corrupted, u_finals_true, jnp.sum(is_bad)
 
 
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
@@ -147,14 +211,34 @@ else:
     loss0, _ = loss_fn(params, u0s_training[:batch_size], u_finals_training[:batch_size])
     print(f"[init] loss={loss0:.6f}")
 
+if ONPOLICY_ENABLED:
+    print(f"Model-in-the-loop actif : {ONPOLICY_TRAJ} trajectoires on-policy, "
+          f"profondeur max {ONPOLICY_MAX_STEPS}, régénérées tous les {ONPOLICY_REGEN_EVERY} epoch(s).")
+
+u0s_epoch, u_finals_epoch = u0s_training, u_finals_training
+N_epoch = N_TRAIN
+n_batches_epoch = n_batches
+
 for epoch in range(start_epoch, nb_epoch):
+    if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
+        key_train, key_onpolicy = random.split(key_train)
+        u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy = generate_onpolicy_pairs(key_onpolicy, params)
+        n_bad_onpolicy = int(n_bad_onpolicy)
+        if n_bad_onpolicy > 0:
+            print(f"  ⚠️  epoch {epoch} : {n_bad_onpolicy}/{u0s_onpolicy.shape[0]} paires on-policy "
+                  f"non-finies (modèle divergent), remplacées par IC propre.")
+        u0s_epoch      = jnp.concatenate([u0s_training, u0s_onpolicy], axis=0)
+        u_finals_epoch = jnp.concatenate([u_finals_training, u_finals_onpolicy], axis=0)
+        N_epoch         = u0s_epoch.shape[0]
+        n_batches_epoch = max(1, N_epoch // batch_size)
+
     key_train, subkey = random.split(key_train)
-    perm = random.permutation(subkey, N_TRAIN)
-    for i in range(n_batches):
+    perm = random.permutation(subkey, N_epoch)
+    for i in range(n_batches_epoch):
         idx = perm[i * batch_size : (i + 1) * batch_size]
         params, opt_state = train_step(
             params, opt_state,
-            u0s_training[idx], u_finals_training[idx]
+            u0s_epoch[idx], u_finals_epoch[idx]
         )
 
     if epoch % 10 == 0:
