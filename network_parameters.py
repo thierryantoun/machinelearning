@@ -20,7 +20,7 @@ T          = 1
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-T_target   = 0.1
+T_target   = 0.2
 batch_size = 64
 nb_epoch   = 100
 n_batches  = N_TRAIN // batch_size
