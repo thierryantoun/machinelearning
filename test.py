@@ -9,6 +9,11 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
+print(f"Backend JAX : {jax.default_backend()}  |  devices : {jax.devices()}")
+if jax.default_backend() == "cpu":
+    print("⚠️  JAX tourne sur CPU (pas de GPU détecté / JAX_PLATFORMS=cpu / "
+          "libs CUDA absentes) -- c'est très probablement pour ça que c'est lent.")
+
 from network_parameters import x, SOLVER, T_target, cfl
 from loss import predict_F
 
