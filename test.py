@@ -1,3 +1,6 @@
+import os
+os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
+
 import pickle
 import time
 from functools import partial
