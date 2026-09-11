@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from network_parameters import x, SOLVER, T_target
+from network_parameters import x, SOLVER, T_target, cfl
 from loss import predict_F
 
 if SOLVER == "advection":
@@ -211,6 +211,43 @@ for name, u0 in test_functions.items():
     fig.tight_layout()
     fig.savefig(f"test_{name}.png", dpi=150)
     print(f"Figure sauvegardée : test_{name}.png")
+
+if SOLVER != "advection":
+    from burgers_solver import flux as _burgers_flux
+
+    def burgers_step_cfl(u):
+        "Un pas Godunov, dt = cfl*dx/max|u|, jamais clampé sur T_target."
+        dt = cfl * dx / (jnp.max(jnp.abs(u)) + 1e-10)
+        f_face = _burgers_flux(u, jnp.roll(u, -1))
+        u_new = u - dt / dx * (f_face - jnp.roll(f_face, 1))
+        return u_new, dt
+
+    @jax.jit
+    def burgers_rollout_cfl(u0, t_final):
+        "Solveur pas-à-pas classique : avance en pas dt naturels jusqu'à t_final."
+        def cond_fn(carry):
+            u, t, n = carry
+            return t < t_final
+
+        def body_fn(carry):
+            u, t, n = carry
+            u_new, dt = burgers_step_cfl(u)
+            return (u_new, t + dt, n + 1)
+
+        return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
+
+    print("\n--- Perf : modèle (blocs T_target) vs solveur pas-à-pas ---")
+    for name, u0 in test_functions.items():
+        for t_phys in PHYSICAL_TIMES:
+            n_steps_model = max(1, round(t_phys / T_target))
+
+            u_model, t_model = _bench(model_rollout, u0, n_steps_model)
+            (u_solver, _, n_dt_steps), t_solver = _bench(burgers_rollout_cfl, u0, t_phys)
+
+            mse = float(jnp.mean((u_model - u_solver) ** 2))
+            speedup = t_solver / t_model if t_model > 0 else float('nan')
+            print(f"[{name}] t={t_phys:g}  modèle={n_steps_model} blocs T_target ({t_model*1e3:.2f}ms)  "
+                  f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  MSE={mse:.6f}  (×{speedup:.1f})")
 
 # ------------------------------------------------------------------
 # Courbe de croissance de l'erreur : ‖ε_n‖_L2 = ‖û_n(modèle) − u_n(vrai)‖
