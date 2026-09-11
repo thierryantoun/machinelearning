@@ -1,6 +1,3 @@
-import os
-os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
-
 import pickle
 import time
 from functools import partial
@@ -9,19 +6,13 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-print(f"Backend JAX : {jax.default_backend()}  |  devices : {jax.devices()}")
-if jax.default_backend() == "cpu":
-    print("⚠️  JAX tourne sur CPU (pas de GPU détecté / JAX_PLATFORMS=cpu / "
-          "libs CUDA absentes) -- c'est très probablement pour ça que c'est lent.")
-
-from network_parameters import x, SOLVER, T_target, cfl
+from network_parameters import x, SOLVER, T_target
 from loss import predict_F
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _active_solver
 else:
     from burgers_solver import burgers_solver as _active_solver
-    from burgers_solver import flux as _burgers_flux
 
 # Le solveur prend T_target (temps physique fixe) au lieu de n_steps.
 solver = lambda u: _active_solver(u, T_target)
@@ -204,8 +195,12 @@ for name, u0 in test_functions.items():
             temps_str += f"  modèle corrigé={t_model_corr*1e3:.1f}ms  (×{surcout:.1f} vs pur)"
             ax.plot(x, u_pred_corr, label=f'prédit (corrigé/{CORRECTION_EVERY})', linewidth=1.5, linestyle='-.')
             ax.set_title(f"t={t_phys:g} ({n_steps} blocs)  MSE pur={mse:.2e}, corrigé={mse_corr:.2e}\n{temps_str}", fontsize=10)
+            print(f"[{name}] t={t_phys:g} (n_steps={n_steps:4d})  MSE pur={mse:.6f}  MSE corrigé={mse_corr:.6f}  "
+                  f"solveur={t_solver:.4f}s  modèle={t_model:.4f}s  modèle corrigé={t_model_corr:.4f}s  (×{surcout:.1f})")
         else:
             ax.set_title(f"t={t_phys:g} ({n_steps} blocs)  MSE={mse:.2e}\n{temps_str}", fontsize=10)
+            print(f"[{name}] t={t_phys:g} (n_steps={n_steps:4d})  MSE={mse:.6f}  "
+                  f"solveur={t_solver:.4f}s  modèle={t_model:.4f}s  (×{speedup:.1f})")
         ax.grid(True, alpha=0.3)
     for ax in axes_flat[len(multiple_steps_list):]:
         ax.set_visible(False)
@@ -216,109 +211,6 @@ for name, u0 in test_functions.items():
     fig.tight_layout()
     fig.savefig(f"test_{name}.png", dpi=150)
     print(f"Figure sauvegardée : test_{name}.png")
-
-if SOLVER != "advection":
-    # ------------------------------------------------------------------
-    # Solveur "pas CFL naturel" (diagnostic). burgers_solver, à l'intérieur
-    # d'un bloc T_target, clampe le dernier sous-pas à T_target - t pour
-    # tomber pile sur la cible : vu de l'extérieur ça "saute" toujours à
-    # T_target. Ici on ne clampe jamais : chaque pas utilise dt = dt_cfl
-    # tel quel, on avance donc en temps physique réel (jamais exactement
-    # T_target, 2*T_target, ...). Ça permet d'observer directement le
-    # mécanisme discuté : dt petit tant que la solution est raide (beaucoup
-    # de sous-pas pour couvrir un bloc T_target -> le solveur est cher),
-    # dt qui grandit et finit par dépasser T_target une fois la solution
-    # décantée (1 seul sous-pas par bloc -> le solveur devient trivial).
-    # ------------------------------------------------------------------
-    def burgers_step_cfl(u):
-        "Un pas Godunov avec dt = cfl*dx/max|u|, jamais clampé sur une cible."
-        dt = cfl * dx / (jnp.max(jnp.abs(u)) + 1e-10)
-        f_face = _burgers_flux(u, jnp.roll(u, -1))
-        u_new = u - dt / dx * (f_face - jnp.roll(f_face, 1))
-        return u_new, dt
-
-    @partial(jax.jit, static_argnames=("max_steps",))
-    def burgers_trace_cfl(u0, t_final, max_steps):
-        """Avance u0 en pas CFL naturels jusqu'à dépasser t_final (ou
-        max_steps atteint), et renvoie la trace (t_n, dt_n) de longueur
-        max_steps -- y compris les pas "morts" après la fin (dt=0, t figé)
-        pour garder une forme statique compatible avec jit/scan."""
-        def body(carry, _):
-            u, t, done = carry
-            u_new, dt = burgers_step_cfl(u)
-            dt = jnp.where(done, 0.0, dt)
-            u_next = jnp.where(done, u, u_new)
-            t_next = jnp.where(done, t, t + dt)
-            done_next = done | (t_next >= t_final)
-            return (u_next, t_next, done_next), (t_next, dt)
-
-        _, (ts, dts) = jax.lax.scan(body, (u0, 0.0, False), None, length=max_steps)
-        return ts, dts
-
-    MAX_STEPS_CFL_TRACE = 6000
-
-    dt_trace_t_final = ERROR_GROWTH_TIME or max(PHYSICAL_TIMES)
-    fig_dt, ax_dt = plt.subplots(figsize=(8, 5))
-    for name, u0 in test_functions.items():
-        ts, dts = burgers_trace_cfl(u0, dt_trace_t_final, MAX_STEPS_CFL_TRACE)
-        jax.block_until_ready((ts, dts))
-        mask = dts > 0
-        # Troncature réelle : le dernier temps atteint est encore < t_final
-        # (le padding dt=0 n'a jamais pris le relais avant la fin du budget
-        # max_steps -- dts[-1] == 0 est au contraire le signe normal de succès).
-        if float(ts[-1]) < dt_trace_t_final - 1e-9:
-            print(f"  ⚠️  {name} : MAX_STEPS_CFL_TRACE={MAX_STEPS_CFL_TRACE} atteint avant "
-                  f"t_final={dt_trace_t_final:g} (arrêté à t={float(ts[-1]):.3g}), trace tronquée.")
-        ax_dt.plot(ts[mask], dts[mask], label=name, linewidth=1.2)
-    ax_dt.axhline(T_target, color="k", linestyle="--", linewidth=1, label="T_target")
-    ax_dt.set_xlabel("t")
-    ax_dt.set_ylabel("dt_cfl naturel")
-    ax_dt.set_yscale("log")
-    ax_dt.set_title("Évolution du pas de temps CFL naturel (sans clamp sur T_target)")
-    ax_dt.grid(True, alpha=0.3, which="both")
-    ax_dt.legend()
-    fig_dt.tight_layout()
-    fig_dt.savefig("dt_cfl_trace.png", dpi=150)
-    print("Figure sauvegardée : dt_cfl_trace.png")
-
-    # ------------------------------------------------------------------
-    # Perf modèle (blocs T_target) vs solveur "classique" (pas dt naturels),
-    # les deux arrêtés au même temps physique t_final -- pas de découpage
-    # artificiel du solveur en blocs T_target ici : contrairement à enchaîner
-    # N appels de burgers_solver(., T_target), qui insère à chaque frontière
-    # de bloc un sous-pas raccourci (donc plus diffusif) pour tomber pile
-    # dessus, burgers_rollout_cfl tourne en pas CFL naturels du début à la
-    # fin. C'est la comparaison de temps de calcul honnête contre un solveur
-    # explicite classique.
-    # ------------------------------------------------------------------
-    @jax.jit
-    def burgers_rollout_cfl(u0, t_final):
-        def cond_fn(carry):
-            u, t, n = carry
-            return t < t_final
-
-        def body_fn(carry):
-            u, t, n = carry
-            u_new, dt = burgers_step_cfl(u)
-            return (u_new, t + dt, n + 1)
-
-        u_final, t_reached, n_steps = jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
-        return u_final, t_reached, n_steps
-
-    print("\n--- Perf : modèle (blocs T_target) vs solveur classique (pas dt naturels) ---")
-    for name, u0 in test_functions.items():
-        for t_phys in PHYSICAL_TIMES:
-            n_steps_model = max(1, round(t_phys / T_target))
-
-            u_model, t_model = _bench(model_rollout, u0, n_steps_model)
-            (u_solver, t_reached, n_dt_steps), t_solver = _bench(burgers_rollout_cfl, u0, t_phys)
-
-            mse = float(jnp.mean((u_model - u_solver) ** 2))
-            speedup = t_solver / t_model if t_model > 0 else float('nan')
-            print(f"[{name}] t={t_phys:g}  "
-                  f"modèle={n_steps_model:4d} blocs T_target ({t_model*1e3:7.2f}ms)  "
-                  f"solveur classique={int(n_dt_steps):5d} pas dt ({t_solver*1e3:7.2f}ms)  "
-                  f"MSE={mse:.6f}  (×{speedup:.1f})")
 
 # ------------------------------------------------------------------
 # Courbe de croissance de l'erreur : ‖ε_n‖_L2 = ‖û_n(modèle) − u_n(vrai)‖
