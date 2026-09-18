@@ -234,12 +234,18 @@ for epoch in range(start_epoch, nb_epoch):
 
     key_train, subkey = random.split(key_train)
     perm = random.permutation(subkey, N_epoch)
+    n_skipped = 0
     for i in range(n_batches_epoch):
         idx = perm[i * batch_size : (i + 1) * batch_size]
-        params, opt_state = train_step(
+        params, opt_state, step_ok = train_step(
             params, opt_state,
             u0s_epoch[idx], u_finals_epoch[idx]
         )
+        if not bool(step_ok):
+            n_skipped += 1
+    if n_skipped > 0:
+        print(f"  ⚠️  epoch {epoch} : {n_skipped}/{n_batches_epoch} batches avec gradient non-fini, "
+              f"update ignorée (params inchangés sur ces batches).")
 
     if epoch % 10 == 0:
         # Évaluation par batches au lieu du dataset complet
