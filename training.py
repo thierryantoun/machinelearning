@@ -1,5 +1,5 @@
 import os
-os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -159,6 +159,29 @@ else:
     )
 train_step = make_train_step(optimizer)
 
+
+@partial(jax.jit, static_argnames=("n_batches_epoch",))
+def run_epoch(params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoch):
+    """Une epoch entière compilée en un seul scan au lieu d'une boucle Python
+    dispatchant train_step batch par batch : ça évite un aller-retour
+    host/device par batch (kernel-launch overhead), qui dominait le temps
+    sur H100 vu la taille des batches."""
+    idx_batches = perm[: n_batches_epoch * batch_size].reshape(n_batches_epoch, batch_size)
+
+    def body(carry, idx):
+        params, opt_state, n_skipped = carry
+        params, opt_state, step_ok = train_step(
+            params, opt_state, u0s_epoch[idx], u_finals_epoch[idx]
+        )
+        n_skipped = n_skipped + jnp.where(step_ok, 0, 1)
+        return (params, opt_state, n_skipped), None
+
+    (params, opt_state, n_skipped), _ = jax.lax.scan(
+        body, (params, opt_state, jnp.array(0, dtype=jnp.int32)), idx_batches
+    )
+    return params, opt_state, n_skipped
+
+
 PATIENCE = 50
 
 
@@ -234,15 +257,10 @@ for epoch in range(start_epoch, nb_epoch):
 
     key_train, subkey = random.split(key_train)
     perm = random.permutation(subkey, N_epoch)
-    n_skipped = 0
-    for i in range(n_batches_epoch):
-        idx = perm[i * batch_size : (i + 1) * batch_size]
-        params, opt_state, step_ok = train_step(
-            params, opt_state,
-            u0s_epoch[idx], u_finals_epoch[idx]
-        )
-        if not bool(step_ok):
-            n_skipped += 1
+    params, opt_state, n_skipped = run_epoch(
+        params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoch
+    )
+    n_skipped = int(n_skipped)
     if n_skipped > 0:
         print(f"  ⚠️  epoch {epoch} : {n_skipped}/{n_batches_epoch} batches avec gradient non-fini, "
               f"update ignorée (params inchangés sur ces batches).")
