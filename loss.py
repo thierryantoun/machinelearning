@@ -22,13 +22,9 @@ def predict_F(params, u0):
     return consistance + N - N_mean
 
 
-kappa = 0.25
 Ktot  = n // 2 + 1
-k_max_fno = K
 kappa     = 0.5
-k0        = int(kappa * k_max_fno)   # k0 = 15, bien < k1_fno=30
-k1_fno    = k_max_fno
-k1_lgno   = Ktot
+k0        = int(kappa * Ktot)
  
  
 def _loss_fno(params, u0s_batch, u_finals_batch):
@@ -41,36 +37,52 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     loss_phys = jnp.mean(erreur / norme)
  
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
-    e_hf    = e_hat[:, k0:k1_fno]
-    loss_hf = 1 / (k1_fno - k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
+    e_hf    = e_hat[:, k0:Ktot]
+    loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
  
-    loss = loss_phys + lambda_hf * loss_hf
+    loss = loss_phys + lambda_hf * loss_hf 
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
  
  
-def _loss_lgno(params, u0s_batch, u_finals_batch):
-    F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
-    erreur = u_pred - u_finals_batch
-    loss_phys = jnp.mean(jnp.sum(jnp.abs(erreur), axis=1) / n)
+# def _loss_lgno(params, u0s_batch, u_finals_batch):
+#     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
+#     u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+#     erreur = u_pred - u_finals_batch
+#     loss_phys = jnp.mean(jnp.sum(jnp.abs(erreur), axis=1) / n)
  
-    e_hat   = jnp.fft.rfft(erreur, axis=-1)
-    e_hf    = e_hat[:, k0:k1_lgno]
-    loss_hf = 1 / (k1_lgno - k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
+#     e_hat   = jnp.fft.rfft(erreur, axis=-1)
+#     e_hf    = e_hat[:, k0:k1_lgno]
+#     loss_hf = 1 / (k1_lgno - k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
  
-    loss = loss_phys + lambda_hf * loss_hf
-    return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
+#     loss = loss_phys + lambda_hf * loss_hf
+#     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
 
 
 
-loss_fn = jax.jit(_loss_fno if MODEL == "fno" else _loss_lgno)
+loss_fn = jax.jit(_loss_fno)
 
 
 def make_train_step(optimizer):
     @jax.jit
     def train_step(params, opt_state, u0s_batch, u_finals_batch):
         grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch)
-        updates, new_opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        return params, new_opt_state
+        grad_finite = jnp.all(jnp.array(
+            [jnp.all(jnp.isfinite(g)) for g in jax.tree_util.tree_leaves(grads)]
+        ))
+
+        def apply(_):
+            updates, new_opt_state = optimizer.update(grads, opt_state, params)
+            new_params = optax.apply_updates(params, updates)
+            return new_params, new_opt_state
+
+        def skip(_):
+            return params, opt_state
+
+        # Garde-fou : un gradient non-fini (NaN/Inf, quelle qu'en soit la
+        # source -- instabilité d'init, paire on-policy passée au travers,
+        # etc.) ne doit jamais être appliqué : ça corromprait irréversiblement
+        # tous les params. On garde alors params/opt_state inchangés pour ce
+        # batch plutôt que de planter tout l'entraînement.
+        params, opt_state = jax.lax.cond(grad_finite, apply, skip, operand=None)
+        return params, opt_state, grad_finite
     return train_step
