@@ -1,4 +1,5 @@
 import os
+os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
 from functools import partial
 
 import jax
