@@ -15,7 +15,9 @@ def make_sinus_u0(key):
 
 def generate_initial_data(key, nb_frequences=K, x=x):
     key, subkey = random.split(key)
-    ic_type = random.randint(subkey, (), 0, 5)  # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe
+    # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe,
+    # 5: marches (constante par morceaux, discontinue), 6: creneau (pulse rectangulaire, discontinu)
+    ic_type = random.randint(subkey, (), 0, 7)
 
     key, subkey = random.split(key)
 
@@ -56,8 +58,30 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         d = d - jnp.round(d)
         return amp * jnp.tanh(sign * steepness * d)
 
+    def make_marches(subkey):
+        "Fonction constante par morceaux : discontinuites de type Riemann multiples (periodique)."
+        k1, k2 = random.split(subkey)
+        n_seg = 5
+        edges  = jnp.sort(random.uniform(k1, (n_seg - 1,), minval=0.0, maxval=1.0))
+        levels = random.uniform(k2, (n_seg,), minval=-1.0, maxval=1.0)
+        seg = jnp.sum(x[:, None] >= edges[None, :], axis=1)  # indice de segment pour chaque x
+        return levels[seg]
+
+    def make_creneau(subkey):
+        "Pulse rectangulaire : deux discontinuites (double probleme de Riemann)."
+        k1, k2, k3 = random.split(subkey, 3)
+        center = random.uniform(k1, (), minval=0.2, maxval=0.8)
+        width  = random.uniform(k2, (), minval=0.05, maxval=0.4)
+        amp    = random.uniform(k3, (), minval=-1.0, maxval=1.0)
+        return amp * (jnp.abs(x - center) < 0.5 * width).astype(x.dtype)
+
     is_constante = (ic_type == 3)
-    u = jax.lax.switch(ic_type, [make_sinus, make_gaussiennes, make_polynomes, make_constante, make_rampe], subkey)
+    u = jax.lax.switch(
+        ic_type,
+        [make_sinus, make_gaussiennes, make_polynomes, make_constante, make_rampe,
+         make_marches, make_creneau],
+        subkey,
+    )
     u = jnp.where(is_constante, u, u / jnp.max(jnp.abs(u)))
 
     return u
