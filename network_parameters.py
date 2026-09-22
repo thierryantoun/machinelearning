@@ -25,7 +25,8 @@ batch_size = 64
 nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size
 
-lambda_hf = 0.05
+lambda_hf   = 0.05
+lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
 
 # ------------------------------------------------------------------
 # Entraînement "model-in-the-loop" (correction de l'exposure bias) :

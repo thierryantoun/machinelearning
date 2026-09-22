@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model
-from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, K, T_target
+from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, K, T_target
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -40,7 +40,7 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     e_hf    = e_hat[:, k0:Ktot]
     loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
  
-    loss = loss_phys + lambda_hf * loss_hf 
+    loss = lambda_phys * loss_phys + lambda_hf * loss_hf
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
  
  
