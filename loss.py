@@ -66,23 +66,7 @@ def make_train_step(optimizer):
     @jax.jit
     def train_step(params, opt_state, u0s_batch, u_finals_batch):
         grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch)
-        grad_finite = jnp.all(jnp.array(
-            [jnp.all(jnp.isfinite(g)) for g in jax.tree_util.tree_leaves(grads)]
-        ))
-
-        def apply(_):
-            updates, new_opt_state = optimizer.update(grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, new_opt_state
-
-        def skip(_):
-            return params, opt_state
-
-        # Garde-fou : un gradient non-fini (NaN/Inf, quelle qu'en soit la
-        # source -- instabilité d'init, paire on-policy passée au travers,
-        # etc.) ne doit jamais être appliqué : ça corromprait irréversiblement
-        # tous les params. On garde alors params/opt_state inchangés pour ce
-        # batch plutôt que de planter tout l'entraînement.
-        params, opt_state = jax.lax.cond(grad_finite, apply, skip, operand=None)
-        return params, opt_state, grad_finite
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, new_opt_state
     return train_step

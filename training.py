@@ -170,17 +170,16 @@ def run_epoch(params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoc
     idx_batches = perm[: n_batches_epoch * batch_size].reshape(n_batches_epoch, batch_size)
 
     def body(carry, idx):
-        params, opt_state, n_skipped = carry
-        params, opt_state, step_ok = train_step(
+        params, opt_state = carry
+        params, opt_state = train_step(
             params, opt_state, u0s_epoch[idx], u_finals_epoch[idx]
         )
-        n_skipped = n_skipped + jnp.where(step_ok, 0, 1)
-        return (params, opt_state, n_skipped), None
+        return (params, opt_state), None
 
-    (params, opt_state, n_skipped), _ = jax.lax.scan(
-        body, (params, opt_state, jnp.array(0, dtype=jnp.int32)), idx_batches
+    (params, opt_state), _ = jax.lax.scan(
+        body, (params, opt_state), idx_batches
     )
-    return params, opt_state, n_skipped
+    return params, opt_state
 
 
 PATIENCE = 50
@@ -258,13 +257,9 @@ for epoch in range(start_epoch, nb_epoch):
 
     key_train, subkey = random.split(key_train)
     perm = random.permutation(subkey, N_epoch)
-    params, opt_state, n_skipped = run_epoch(
+    params, opt_state = run_epoch(
         params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoch
     )
-    n_skipped = int(n_skipped)
-    if n_skipped > 0:
-        print(f"  ⚠️  epoch {epoch} : {n_skipped}/{n_batches_epoch} batches avec gradient non-fini, "
-              f"update ignorée (params inchangés sur ces batches).")
 
     if epoch % 10 == 0:
         # Évaluation par batches au lieu du dataset complet

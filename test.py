@@ -5,6 +5,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 
 from network_parameters import x, SOLVER, T_target, cfl
 from loss import predict_F
@@ -60,7 +61,7 @@ def model_rollout(u0, n_steps, correction_every=None):
     return u_pred
 
 
-CORRECTION_EVERY = 8
+CORRECTION_EVERY = 4
 
 
 @partial(jax.jit, static_argnames=("n_steps", "correction_every"))
@@ -131,39 +132,26 @@ def _bench(fn, *args, warmup=2, repeat=5):
     return out, best
 
 
-def rollout(u0, n_steps):
-    u_target, t_solver = _bench(solver_rollout, u0, n_steps)
-    u_pred, t_model = _bench(model_rollout, u0, n_steps)
-
-    mse = float(jnp.mean((u_pred - u_target) ** 2))
-
-    # Inutile de calculer/afficher la version "corrigée" si CORRECTION_EVERY
-    # est désactivé (<=0) ou si la correction ne se déclenche jamais sur ce
-    # nombre de blocs (n_steps < CORRECTION_EVERY).
-    has_correction = CORRECTION_EVERY > 0 and n_steps >= CORRECTION_EVERY
-    if has_correction:
-        model_rollout_corr = partial(model_rollout, correction_every=CORRECTION_EVERY)
-        u_pred_corr, t_model_corr = _bench(model_rollout_corr, u0, n_steps)
-        mse_corr = float(jnp.mean((u_pred_corr - u_target) ** 2))
-    else:
-        u_pred_corr = None
-        mse_corr = None
-        t_model_corr = None
-
-    return u_target, u_pred, u_pred_corr, mse, mse_corr, t_solver, t_model, t_model_corr
-
-
 # Fonctions initiales absentes du dataset d'entraînement (initial_data.py ne
 # génère que : sinus multi-fréquences, somme de gaussiennes, polynôme, constante,
 # rampe tanh).
 u0_triangle = 2 / jnp.pi * jnp.arcsin(jnp.sin(2 * jnp.pi * x))
 u0_carre    = jnp.sign(jnp.sin(2 * jnp.pi * x))
 u0_paquet   = jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x)
+u0_sinus_simple = jnp.sin(2 * jnp.pi * x)
+u0_somme_sinus  = (
+    1.0 * jnp.sin(2 * jnp.pi * 1 * x)
+    + 0.5 * jnp.sin(2 * jnp.pi * 3 * x + 0.7)
+    + 0.3 * jnp.sin(2 * jnp.pi * 7 * x + 2.1)
+)
+u0_somme_sinus = u0_somme_sinus / jnp.max(jnp.abs(u0_somme_sinus))
 
 test_functions = {
     "triangle":     u0_triangle,
     "carre":        u0_carre,
     "paquet_onde":  u0_paquet,
+    "sinus_simple": u0_sinus_simple,
+    "somme_sinus":  u0_somme_sinus,
 }
 
 # Temps physiques fixes (indépendants de T_target) sur lesquels comparer les
@@ -174,43 +162,90 @@ test_functions = {
 PHYSICAL_TIMES = [0.1, 1, 5, 10, 200]
 multiple_steps_list = [max(1, round(t / T_target)) for t in PHYSICAL_TIMES]
 
-n_cols = 3
-n_rows = -(-len(multiple_steps_list) // n_cols)  # ceil
+# ------------------------------------------------------------------
+# Films (au lieu de snapshots à quelques instants) : évolution temporelle
+# continue cible vs modèle (pur et corrigé), pour carré, triangle, somme de
+# sinus et sinus simple. On collecte toute la trajectoire en un seul
+# lax.scan (au lieu de relancer un rollout complet par instant comme pour
+# les anciens snapshots), puis on anime avec FuncAnimation.
+# ------------------------------------------------------------------
+MOVIE_TIME = 50
+MOVIE_FPS  = 10
+MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple"]
 
-for name, u0 in test_functions.items():
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), sharex=True)
-    axes_flat = axes.flat
-    for ax, n_steps in zip(axes_flat, multiple_steps_list):
-        t_phys = n_steps * T_target
-        u_target, u_pred, u_pred_corr, mse, mse_corr, t_solver, t_model, t_model_corr = rollout(u0, n_steps)
-        ax.plot(x, u0,       label='u₀',           linestyle='--', alpha=0.5)
-        ax.plot(x, u_target, label='cible',         linewidth=1.5)
-        ax.plot(x, u_pred,   label='prédit (pur)',  linewidth=1.5, linestyle=':')
+n_frames = max(1, round(MOVIE_TIME / T_target))
+t_frames = jnp.arange(1, n_frames + 1) * T_target
+has_corr_movie = CORRECTION_EVERY > 0 and n_frames >= CORRECTION_EVERY
 
-        speedup = t_solver / t_model if t_model > 0 else float('nan')
-        temps_str = f"solveur={t_solver*1e3:.1f}ms  modèle={t_model*1e3:.1f}ms  (×{speedup:.1f})"
 
-        if u_pred_corr is not None:
-            surcout = t_model_corr / t_model if t_model > 0 else float('nan')
-            temps_str += f"  modèle corrigé={t_model_corr*1e3:.1f}ms  (×{surcout:.1f} vs pur)"
-            ax.plot(x, u_pred_corr, label=f'prédit (corrigé/{CORRECTION_EVERY})', linewidth=1.5, linestyle='-.')
-            ax.set_title(f"t={t_phys:g} ({n_steps} blocs)  MSE pur={mse:.2e}, corrigé={mse_corr:.2e}\n{temps_str}", fontsize=10)
-            print(f"[{name}] t={t_phys:g} (n_steps={n_steps:4d})  MSE pur={mse:.6f}  MSE corrigé={mse_corr:.6f}  "
-                  f"solveur={t_solver:.4f}s  modèle={t_model:.4f}s  modèle corrigé={t_model_corr:.4f}s  (×{surcout:.1f})")
-        else:
-            ax.set_title(f"t={t_phys:g} ({n_steps} blocs)  MSE={mse:.2e}\n{temps_str}", fontsize=10)
-            print(f"[{name}] t={t_phys:g} (n_steps={n_steps:4d})  MSE={mse:.6f}  "
-                  f"solveur={t_solver:.4f}s  modèle={t_model:.4f}s  (×{speedup:.1f})")
-        ax.grid(True, alpha=0.3)
-    for ax in axes_flat[len(multiple_steps_list):]:
-        ax.set_visible(False)
-    axes.flat[0].legend()
-    for ax in axes.flat[max(0, len(multiple_steps_list) - n_cols):len(multiple_steps_list)]:
-        ax.set_xlabel('x')
-    fig.suptitle(f"Rollout — fonction test « {name} » (T_target={T_target})")
-    fig.tight_layout()
-    fig.savefig(f"test_{name}.png", dpi=150)
-    print(f"Figure sauvegardée : test_{name}.png")
+@partial(jax.jit, static_argnames=("n_steps",))
+def solver_trajectory(u0, n_steps):
+    def solver_block(u, _):
+        u_next, _, _ = solver(u)
+        return u_next, u_next
+    _, us = jax.lax.scan(solver_block, u0, None, length=n_steps)
+    return us
+
+
+@partial(jax.jit, static_argnames=("n_steps", "correction_every"))
+def model_trajectory(u0, n_steps, correction_every=None):
+    def model_block(u, i):
+        u_next, _ = step(u, T_target)
+        if correction_every:
+            do_correct = ((i + 1) % correction_every) == 0
+            u_next = jax.lax.cond(do_correct, lambda uu: solver(uu)[0], lambda uu: uu, u_next)
+        return u_next, u_next
+    _, us = jax.lax.scan(model_block, u0, jnp.arange(n_steps))
+    return us
+
+
+def make_movie(name, u0):
+    u_true_traj = solver_trajectory(u0, n_frames)
+    u_pred_traj = model_trajectory(u0, n_frames)
+    u_corr_traj = model_trajectory(u0, n_frames, correction_every=CORRECTION_EVERY) if has_corr_movie else None
+    jax.block_until_ready((u_true_traj, u_pred_traj, u_corr_traj))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
+    line_true, = ax.plot(x, u0, label='cible', linewidth=1.5)
+    line_pred, = ax.plot(x, u0, label='prédit (pur)', linewidth=1.5, linestyle=':')
+    lines = [line_true, line_pred]
+    if has_corr_movie:
+        line_corr, = ax.plot(x, u0, label=f'prédit (corrigé/{CORRECTION_EVERY})', linewidth=1.5, linestyle='-.')
+        lines.append(line_corr)
+
+    # L'échelle Y est calée sur cible/u0/corrigé uniquement : sur un horizon
+    # long, le modèle "pur" (sans réinjection) diverge souvent complètement
+    # (valeurs énormes voire NaN), ce qui écraserait sinon toutes les autres
+    # courbes en lignes plates invisibles. Le pur sort donc simplement du
+    # cadre quand il diverge, au lieu de casser l'échelle.
+    ref_vals = [u0, u_true_traj] + ([u_corr_traj] if has_corr_movie else [])
+    ymin = min(float(jnp.min(v)) for v in ref_vals)
+    ymax = max(float(jnp.max(v)) for v in ref_vals)
+    margin = 0.1 * (ymax - ymin + 1e-6)
+    ax.set_ylim(ymin - margin, ymax + margin)
+    ax.set_xlabel('x')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right')
+    title = ax.set_title("")
+
+    def update(frame):
+        line_true.set_ydata(u_true_traj[frame])
+        line_pred.set_ydata(u_pred_traj[frame])
+        if has_corr_movie:
+            line_corr.set_ydata(u_corr_traj[frame])
+        title.set_text(f"« {name} »  —  t={float(t_frames[frame]):.2f}  (T_target={T_target})")
+        return lines + [title]
+
+    anim = FuncAnimation(fig, update, frames=n_frames, interval=1000 / MOVIE_FPS, blit=False)
+    out_path = f"movie_{name}.gif"
+    anim.save(out_path, writer=PillowWriter(fps=MOVIE_FPS))
+    plt.close(fig)
+    print(f"Film sauvegardé : {out_path}")
+
+
+for name in MOVIE_FUNCTIONS:
+    make_movie(name, test_functions[name])
 
 if SOLVER != "advection":
     from burgers_solver import flux as _burgers_flux
@@ -250,6 +285,50 @@ if SOLVER != "advection":
                   f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  MSE={mse:.6f}  (×{speedup:.1f})")
 
 # ------------------------------------------------------------------
+# Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
+# rollout (n_steps croissant), avec et sans correction.
+#   E_B(t)   = Σ_{k∈bande} |û(k,t)|²             (énergie spectrale de la bande)
+#   ε_B(t)   = |E_B,pred(t) − E_B,true(t)| / (E_B,true(t) + ε)
+# Bandes identiques à la table de référence (grille n=256 -> rfft sur 129
+# bins, k=0..128) : low k∈[1,5], mid k∈[6,15], hi1 k∈[16,31], hi2 k∈[32,47],
+# hi3 k∈[48,63], hi4 k∈[64,95], hi5 k∈[96,128].
+# ------------------------------------------------------------------
+FREQ_BANDS = {
+    "low": (1, 5), "mid": (6, 15), "hi1": (16, 31), "hi2": (32, 47),
+    "hi3": (48, 63), "hi4": (64, 95), "hi5": (96, 128),
+}
+EPS_BAND = 1e-12
+
+
+def band_energy(u):
+    "E_B = Σ_k |û(k)|² pour k dans chaque bande de FREQ_BANDS."
+    power = jnp.abs(jnp.fft.rfft(u, axis=-1)) ** 2
+    return {name: jnp.sum(power[..., k0:k1 + 1], axis=-1) for name, (k0, k1) in FREQ_BANDS.items()}
+
+
+def band_error(u_pred, u_true):
+    "ε_B par bande, entre un champ prédit et sa référence."
+    e_pred, e_true = band_energy(u_pred), band_energy(u_true)
+    return {name: jnp.abs(e_pred[name] - e_true[name]) / (e_true[name] + EPS_BAND) for name in FREQ_BANDS}
+
+
+def print_band_table(title, correction_every):
+    print(f"\n--- {title} ---")
+    print(f"{'traj':<12}{'n_steps':>8}" + "".join(f"{b:>12}" for b in FREQ_BANDS))
+    for name, u0 in test_functions.items():
+        for n_steps in multiple_steps_list:
+            u_true = solver_rollout(u0, n_steps)
+            u_pred = model_rollout(u0, n_steps, correction_every=correction_every)
+            errs = band_error(u_pred, u_true)
+            row = f"{name:<12}{n_steps:>8}" + "".join(f"{float(errs[b]):>12.2e}" for b in FREQ_BANDS)
+            print(row)
+
+
+print_band_table("Erreur par bande de fréquence — SANS correction", correction_every=None)
+print_band_table(f"Erreur par bande de fréquence — AVEC correction (every={CORRECTION_EVERY})",
+                  correction_every=CORRECTION_EVERY)
+
+# ------------------------------------------------------------------
 # Courbe de croissance de l'erreur : ‖ε_n‖_L2 = ‖û_n(modèle) − u_n(vrai)‖
 # en fonction de t_n = n · T_target, pour chaque fonction test.
 # ------------------------------------------------------------------
@@ -264,10 +343,8 @@ for name, u0 in test_functions.items():
         u0, n_steps_err, correction_every=CORRECTION_EVERY if has_corr else None
     )
     jax.block_until_ready((errs_pur, errs_corr, norms_true))
-    line, = ax_err.plot(t_n, errs_pur, label=f"{name} — pur", linewidth=1.5)
     if has_corr:
-        ax_err.plot(t_n, errs_corr, color=line.get_color(), linestyle="--",
-                    linewidth=1.5, label=f"{name} — corrigé/{CORRECTION_EVERY}")
+        ax_err.plot(t_n, errs_corr, linewidth=1.5, label=f"{name} — corrigé/{CORRECTION_EVERY}")
         print(f"[{name}] ‖ε‖_L2 pur : t={T_target:g} → {float(errs_pur[0]):.3e}   "
               f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}    "
               f"corrigé : t={float(t_n[-1]):g} → {float(errs_corr[-1]):.3e}")

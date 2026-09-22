@@ -19,16 +19,6 @@ def flux(u_L, u_R):
 
 @jax.jit
 def burgers_solver(u, T_target):
-    """
-    Integre Burgers jusqu'au temps physique T_target (pas un nombre de pas fixe).
-    dt reste adaptatif (CFL) a chaque sous-pas ; le dernier sous-pas est tronque
-    pour ne jamais depasser T_target. Tous les echantillons generes avec le meme
-    T_target auront donc exactement le meme T -- plus d'heterogeneite T_min/T_max.
-
-    Retourne (u_final, F_moyen, T_target) -- T_target est renvoye tel quel
-    (au lieu du t_final accumule) pour que l'appelant recupere une valeur
-    exacte et deterministe, sans erreur d'arrondi de sommation de dt.
-    """
 
     def cond_fn(carry):
         u, t, F = carry
