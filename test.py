@@ -5,7 +5,6 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, PillowWriter
 
 from network_parameters import x, SOLVER, T_target, cfl
 from loss import predict_F
@@ -165,89 +164,43 @@ PHYSICAL_TIMES = [0.1, 1, 5, 10, 200]
 multiple_steps_list = [max(1, round(t / T_target)) for t in PHYSICAL_TIMES]
 
 # ------------------------------------------------------------------
-# Films (au lieu de snapshots à quelques instants) : évolution temporelle
-# continue cible vs modèle (pur et corrigé), pour carré, triangle, somme de
-# sinus et sinus simple. On collecte toute la trajectoire en un seul
-# lax.scan (au lieu de relancer un rollout complet par instant comme pour
-# les anciens snapshots), puis on anime avec FuncAnimation.
+# Snapshots : comparaison cible vs modèle (pur et corrigé) à un ou
+# plusieurs instants fixes du rollout, plutôt qu'un film complet.
+# Modifier SNAPSHOT_TIMES pour choisir les instants à tracer.
 # ------------------------------------------------------------------
-MOVIE_TIME = 50
-MOVIE_FPS  = 10
-MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
-
-n_frames = max(1, round(MOVIE_TIME / T_target))
-t_frames = jnp.arange(1, n_frames + 1) * T_target
-has_corr_movie = CORRECTION_EVERY > 0 and n_frames >= CORRECTION_EVERY
+SNAPSHOT_TIMES = [0.5]  # temps physiques auxquels tracer un plot (ex: [1, 10, 50, 200])
+SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 
-@partial(jax.jit, static_argnames=("n_steps",))
-def solver_trajectory(u0, n_steps):
-    def solver_block(u, _):
-        u_next, _, _ = solver(u)
-        return u_next, u_next
-    _, us = jax.lax.scan(solver_block, u0, None, length=n_steps)
-    return us
+def make_snapshot(name, u0, t_phys):
+    n_steps = max(1, round(t_phys / T_target))
+    has_corr = CORRECTION_EVERY > 0 and n_steps >= CORRECTION_EVERY
 
-
-@partial(jax.jit, static_argnames=("n_steps", "correction_every"))
-def model_trajectory(u0, n_steps, correction_every=None):
-    def model_block(u, i):
-        u_next, _ = step(u, T_target)
-        if correction_every:
-            do_correct = ((i + 1) % correction_every) == 0
-            u_next = jax.lax.cond(do_correct, lambda uu: solver(uu)[0], lambda uu: uu, u_next)
-        return u_next, u_next
-    _, us = jax.lax.scan(model_block, u0, jnp.arange(n_steps))
-    return us
-
-
-def make_movie(name, u0):
-    u_true_traj = solver_trajectory(u0, n_frames)
-    u_pred_traj = model_trajectory(u0, n_frames)
-    u_corr_traj = model_trajectory(u0, n_frames, correction_every=CORRECTION_EVERY) if has_corr_movie else None
-    jax.block_until_ready((u_true_traj, u_pred_traj, u_corr_traj))
+    u_true = solver_rollout(u0, n_steps)
+    u_pred = model_rollout(u0, n_steps)
+    u_corr = model_rollout(u0, n_steps, correction_every=CORRECTION_EVERY) if has_corr else None
+    jax.block_until_ready((u_true, u_pred, u_corr))
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
-    line_true, = ax.plot(x, u0, label='cible', linewidth=1.5)
-    line_pred, = ax.plot(x, u0, label='prédit (pur)', linewidth=1.5, linestyle=':')
-    lines = [line_true, line_pred]
-    if has_corr_movie:
-        line_corr, = ax.plot(x, u0, label=f'prédit (corrigé/{CORRECTION_EVERY})', linewidth=1.5, linestyle='-.')
-        lines.append(line_corr)
-
-    # L'échelle Y est calée sur cible/u0/corrigé uniquement : sur un horizon
-    # long, le modèle "pur" (sans réinjection) diverge souvent complètement
-    # (valeurs énormes voire NaN), ce qui écraserait sinon toutes les autres
-    # courbes en lignes plates invisibles. Le pur sort donc simplement du
-    # cadre quand il diverge, au lieu de casser l'échelle.
-    ref_vals = [u0, u_true_traj] + ([u_corr_traj] if has_corr_movie else [])
-    ymin = min(float(jnp.min(v)) for v in ref_vals)
-    ymax = max(float(jnp.max(v)) for v in ref_vals)
-    margin = 0.1 * (ymax - ymin + 1e-6)
-    ax.set_ylim(ymin - margin, ymax + margin)
+    ax.plot(x, u_true, label='cible', linewidth=1.5)
+    ax.plot(x, u_pred, label='prédit (pur)', linewidth=1.5, linestyle=':')
+    if has_corr:
+        ax.plot(x, u_corr, label=f'prédit (corrigé/{CORRECTION_EVERY})', linewidth=1.5, linestyle='-.')
     ax.set_xlabel('x')
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper right')
-    title = ax.set_title("")
-
-    def update(frame):
-        line_true.set_ydata(u_true_traj[frame])
-        line_pred.set_ydata(u_pred_traj[frame])
-        if has_corr_movie:
-            line_corr.set_ydata(u_corr_traj[frame])
-        title.set_text(f"« {name} »  —  t={float(t_frames[frame]):.2f}  (T_target={T_target})")
-        return lines + [title]
-
-    anim = FuncAnimation(fig, update, frames=n_frames, interval=1000 / MOVIE_FPS, blit=False)
-    out_path = f"movie_{name}.gif"
-    anim.save(out_path, writer=PillowWriter(fps=MOVIE_FPS))
+    ax.set_title(f"« {name} »  —  t={t_phys:g}  (T_target={T_target})")
+    fig.tight_layout()
+    out_path = f"snapshot_{name}_t{t_phys:g}.png"
+    fig.savefig(out_path, dpi=150)
     plt.close(fig)
-    print(f"Film sauvegardé : {out_path}")
+    print(f"Snapshot sauvegardé : {out_path}")
 
 
-for name in MOVIE_FUNCTIONS:
-    make_movie(name, test_functions[name])
+for name in SNAPSHOT_FUNCTIONS:
+    for t_phys in SNAPSHOT_TIMES:
+        make_snapshot(name, test_functions[name], t_phys)
 
 if SOLVER != "advection":
     from burgers_solver import flux as _burgers_flux
@@ -282,9 +235,10 @@ if SOLVER != "advection":
             (u_solver, _, n_dt_steps), t_solver = _bench(burgers_rollout_cfl, u0, t_phys)
 
             mse = float(jnp.mean((u_model - u_solver) ** 2))
+            mse_norm = mse / (float(jnp.mean(u_solver ** 2)) + 1e-12)
             speedup = t_solver / t_model if t_model > 0 else float('nan')
             print(f"[{name}] t={t_phys:g}  modèle={n_steps_model} blocs T_target ({t_model*1e3:.2f}ms)  "
-                  f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  MSE={mse:.6f}  (×{speedup:.1f})")
+                  f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  MSE={mse:.6f}  MSE_norm={mse_norm:.6f}  (×{speedup:.1f})")
 
 # ------------------------------------------------------------------
 # Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
