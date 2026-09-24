@@ -25,7 +25,7 @@ batch_size = 64
 nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size
 
-lambda_hf   = 0.05
+lambda_grad = 0.05  # poids de la loss de gradient (Sobolev H1) sur l'erreur, remplace l'ancienne loss_hf en bande de Fourier (kappa)
 lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
 
 # ------------------------------------------------------------------
@@ -45,7 +45,7 @@ ONPOLICY_DEPTHS_PER_TRAJ = 4      # nb de profondeurs piochées par trajectoire 
 ONPOLICY_REGEN_EVERY   = 1        # régénère les paires on-policy tous les N epochs
 
 # ------------------------------------------------------------------
-# �~@ METTRE �~@ True �~@ CHAQUE CHANGEMENT DE STAGE (MULTIPLE_STEPS, lambda_hf, K, etc.)
+# METTRE A True A CHAQUE CHANGEMENT DE STAGE (MULTIPLE_STEPS, lambda_grad, K, etc.)
 # La loss n'est alors plus comparable au stage précédent : on repart d'un
 # best_val vierge pour ne pas bloquer la sauvegarde / déclencher un early
 # stopping prématuré sur une métrique qui n'a plus le même sens.
