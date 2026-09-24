@@ -20,7 +20,7 @@ solver = lambda u: _active_solver(u, T_target)
 
 dx = x[1] - x[0]
 
-with open("params_fno_no_correction_new_ic_T01_lambdahf005.pkl", "rb") as f:
+with open("params_fno.pkl", "rb") as f:
     params = pickle.load(f)
 
 
@@ -61,7 +61,7 @@ def model_rollout(u0, n_steps, correction_every=None):
     return u_pred
 
 
-CORRECTION_EVERY = 4
+CORRECTION_EVERY = 0
 
 
 @partial(jax.jit, static_argnames=("n_steps", "correction_every"))
@@ -145,6 +145,7 @@ u0_somme_sinus  = (
     + 0.3 * jnp.sin(2 * jnp.pi * 7 * x + 2.1)
 )
 u0_somme_sinus = u0_somme_sinus / jnp.max(jnp.abs(u0_somme_sinus))
+u0_riemann = jnp.where(x < 0.5, 1.0, -0.5)  # probleme de Riemann simple (une discontinuite, cas test standard pour la formation de choc en Burgers)
 
 test_functions = {
     "triangle":     u0_triangle,
@@ -152,6 +153,7 @@ test_functions = {
     "paquet_onde":  u0_paquet,
     "sinus_simple": u0_sinus_simple,
     "somme_sinus":  u0_somme_sinus,
+    "riemann":      u0_riemann,
 }
 
 # Temps physiques fixes (indépendants de T_target) sur lesquels comparer les
@@ -171,7 +173,7 @@ multiple_steps_list = [max(1, round(t / T_target)) for t in PHYSICAL_TIMES]
 # ------------------------------------------------------------------
 MOVIE_TIME = 50
 MOVIE_FPS  = 10
-MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple"]
+MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 n_frames = max(1, round(MOVIE_TIME / T_target))
 t_frames = jnp.arange(1, n_frames + 1) * T_target
@@ -335,30 +337,19 @@ print_band_table(f"Erreur par bande de fréquence — AVEC correction (every={CO
 error_growth_time = ERROR_GROWTH_TIME if ERROR_GROWTH_TIME is not None else max(PHYSICAL_TIMES)
 n_steps_err = max(1, round(error_growth_time / T_target))
 t_n = jnp.arange(1, n_steps_err + 1) * T_target
-has_corr = CORRECTION_EVERY > 0 and n_steps_err >= CORRECTION_EVERY
 
 fig_err, ax_err = plt.subplots(figsize=(8, 5))
 for name, u0 in test_functions.items():
-    errs_pur, errs_corr, norms_true = error_growth(
-        u0, n_steps_err, correction_every=CORRECTION_EVERY if has_corr else None
-    )
-    jax.block_until_ready((errs_pur, errs_corr, norms_true))
-    if has_corr:
-        ax_err.plot(t_n, errs_corr, linewidth=1.5, label=f"{name} — corrigé/{CORRECTION_EVERY}")
-        print(f"[{name}] ‖ε‖_L2 pur : t={T_target:g} → {float(errs_pur[0]):.3e}   "
-              f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}    "
-              f"corrigé : t={float(t_n[-1]):g} → {float(errs_corr[-1]):.3e}")
-    else:
-        print(f"[{name}] ‖ε‖_L2 : t={T_target:g} → {float(errs_pur[0]):.3e}   "
-              f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")
+    errs_pur, _, norms_true = error_growth(u0, n_steps_err)
+    jax.block_until_ready((errs_pur, norms_true))
+    ax_err.plot(t_n, errs_pur, linewidth=1.5, label=name)
+    print(f"[{name}] ‖ε‖_L2 : t={T_target:g} → {float(errs_pur[0]):.3e}   "
+          f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")
 
 ax_err.set_xlabel("t_n = n · T_target")
 ax_err.set_ylabel("‖ε_n‖_L2  =  ‖û_n − u_n(vrai)‖")
 ax_err.set_yscale("log")
-ax_err.set_title(
-    f"Croissance de l'erreur du modèle (T_target={T_target}"
-    + (f", correction tous les {CORRECTION_EVERY} blocs)" if has_corr else ")")
-)
+ax_err.set_title(f"Croissance de l'erreur du modèle (T_target={T_target})")
 ax_err.grid(True, alpha=0.3, which="both")
 ax_err.legend()
 fig_err.tight_layout()
