@@ -38,7 +38,7 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
 
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
     e_hf    = e_hat[:, k0:Ktot]
-    loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
+    loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf), axis=-1))
 
     loss = lambda_phys * loss_phys + lambda_hf * loss_hf
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
