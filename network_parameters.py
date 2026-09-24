@@ -13,7 +13,7 @@ SOLVER = "burgers"   # "advection" ou "burgers"
 
 K          = 40
 N_TRAJ         = 100   # nombre de trajectoires longues
-MULTIPLE_STEPS = 00  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
+MULTIPLE_STEPS = 200  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
 T          = 1
