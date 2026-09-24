@@ -17,7 +17,8 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     key, subkey = random.split(key)
     # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe,
     # 5: marches (constante par morceaux, discontinue), 6: creneau (pulse rectangulaire, discontinu)
-    ic_type = random.randint(subkey, (), 0, 7)
+    # 7: riemann (une seule discontinuite, deux niveaux aleatoires)
+    ic_type = random.randint(subkey, (), 0, 8)
 
     key, subkey = random.split(key)
 
@@ -75,11 +76,19 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         amp    = random.uniform(k3, (), minval=-1.0, maxval=1.0)
         return amp * (jnp.abs(x - center) < 0.5 * width).astype(x.dtype)
 
+    def make_riemann(subkey):
+        "Probleme de Riemann simple : une seule discontinuite, deux niveaux constants aleatoires."
+        k1, k2, k3 = random.split(subkey, 3)
+        split  = random.uniform(k1, (), minval=0.0, maxval=1.0)
+        levelL = random.uniform(k2, (), minval=-1.0, maxval=1.0)
+        levelR = random.uniform(k3, (), minval=-1.0, maxval=1.0)
+        return jnp.where(x < split, levelL, levelR)
+
     is_constante = (ic_type == 3)
     u = jax.lax.switch(
         ic_type,
         [make_sinus, make_gaussiennes, make_polynomes, make_constante, make_rampe,
-         make_marches, make_creneau],
+         make_marches, make_creneau, make_riemann],
         subkey,
     )
     u = jnp.where(is_constante, u, u / jnp.max(jnp.abs(u)))
