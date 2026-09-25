@@ -18,7 +18,7 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe,
     # 5: marches (constante par morceaux, discontinue), 6: creneau (pulse rectangulaire, discontinu)
     # 7: riemann (une seule discontinuite, deux niveaux aleatoires)
-    # 8: ondulation_hf (petite ondulation haute frequence k > K sur un fond constant)
+    # 8: sinus_hf (sinus haute frequence k > K, sans choc pendant un bloc T_target)
     ic_type = random.randint(subkey, (), 0, 9)
 
     key, subkey = random.split(key)
@@ -30,16 +30,13 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         ks = jnp.arange(1, K+1)
         return jnp.sum(a_k[:, None] * jnp.sin(2*jnp.pi*ks[:, None]*x[None, :] + phase_k[:, None]), axis=0)
 
-    def make_ondulation_hf(subkey, n_blocs=1, T=T_target):
-        "Ondulation HF transportée par un fond constant, sans choc pendant n_blocs."
-        k1, k2, k3, k4, k5 = random.split(subkey, 5)
-        signe = jnp.sign(random.uniform(k1, (), minval=-1.0, maxval=1.0))
-        c   = signe * random.uniform(k2, (), minval=0.3, maxval=1.0)    # fond : vitesse de transport
-        kc  = random.randint(k3, (), K + 1, x.shape[0] // 2)            # porteuse au-dessus de K
-        eps_max = 1.0 / (2 * jnp.pi * kc * n_blocs * T)                 # t_choc > n_blocs * T
-        eps = random.uniform(k4, (), minval=0.3, maxval=0.9) * eps_max
-        phi = random.uniform(k5, (), minval=0.0, maxval=2 * jnp.pi)
-        return c + eps * jnp.sin(2 * jnp.pi * kc * x + phi)
+    def make_sinus_hf(subkey):
+        "Sinus haute fréquence, sans choc pendant un bloc T_target."
+        k1, k2, k3 = random.split(subkey, 3)
+        kc  = random.randint(k1, (), K + 1, x.shape[0] // 2)       # fréquence au-dessus de K
+        eps = random.uniform(k2, (), minval=0.3, maxval=0.9) / (2 * jnp.pi * kc * T_target)
+        phi = random.uniform(k3, (), minval=0.0, maxval=2 * jnp.pi)
+        return eps * jnp.sin(2 * jnp.pi * kc * x + phi)
 
     def make_gaussiennes(subkey):
         n_gaussians = 4
@@ -99,13 +96,13 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     u = jax.lax.switch(
         ic_type,
         [make_sinus, make_gaussiennes, make_polynomes, make_constante, make_rampe,
-         make_marches, make_creneau, make_riemann, make_ondulation_hf],
+         make_marches, make_creneau, make_riemann, make_sinus_hf],
         subkey,
     )
-    # constante (3) et ondulation_hf (8) ne sont pas renormalisees : pour
-    # ondulation_hf, sa petite amplitude eps est une caracteristique voulue
+    # constante (3) et sinus_hf (8) ne sont pas renormalisees : pour
+    # sinus_hf, sa petite amplitude eps est une caracteristique voulue
     # (pas de choc dans le bloc) que la renormalisation a max|u|=1 detruirait.
-    skip_normalize = (ic_type == 3) | (ic_type == 8)
-    u = jnp.where(skip_normalize, u, u / jnp.max(jnp.abs(u)))
+    sans_normalisation = (ic_type == 3) | (ic_type == 8)
+    u = jnp.where(sans_normalisation, u, u / jnp.max(jnp.abs(u)))
 
     return u
