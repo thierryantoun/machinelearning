@@ -18,7 +18,8 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe,
     # 5: marches (constante par morceaux, discontinue), 6: creneau (pulse rectangulaire, discontinu)
     # 7: riemann (une seule discontinuite, deux niveaux aleatoires)
-    ic_type = random.randint(subkey, (), 0, 8)
+    # 8: sinus_hf (sinus multi-frequences, uniquement k > K, hors bande d'entrainement basse frequence)
+    ic_type = random.randint(subkey, (), 0, 9)
 
     key, subkey = random.split(key)
 
@@ -27,6 +28,14 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         key2, subkey2 = random.split(subkey)
         phase_k = random.uniform(subkey2, (K,), minval=0.0, maxval=2*jnp.pi)
         ks = jnp.arange(1, K+1)
+        return jnp.sum(a_k[:, None] * jnp.sin(2*jnp.pi*ks[:, None]*x[None, :] + phase_k[:, None]), axis=0)
+
+    def make_sinus_hf(subkey):
+        "Sinus multi-frequences, uniquement des frequences hautes k > K = 40 (hors bande basse frequence du dataset d'entrainement)."
+        a_k = random.uniform(subkey, (K,), minval=-1.0, maxval=1.0)
+        key2, subkey2 = random.split(subkey)
+        phase_k = random.uniform(subkey2, (K,), minval=0.0, maxval=2*jnp.pi)
+        ks = jnp.arange(K + 1, 2 * K + 1)
         return jnp.sum(a_k[:, None] * jnp.sin(2*jnp.pi*ks[:, None]*x[None, :] + phase_k[:, None]), axis=0)
 
     def make_gaussiennes(subkey):
@@ -88,7 +97,7 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     u = jax.lax.switch(
         ic_type,
         [make_sinus, make_gaussiennes, make_polynomes, make_constante, make_rampe,
-         make_marches, make_creneau, make_riemann],
+         make_marches, make_creneau, make_riemann, make_sinus_hf],
         subkey,
     )
     u = jnp.where(is_constante, u, u / jnp.max(jnp.abs(u)))
