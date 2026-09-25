@@ -32,8 +32,8 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
-    erreur = jnp.sum(jnp.abs(erreur_vec), axis=1)
-    norme  = jnp.sum(jnp.abs(u_finals_batch), axis=1) + 1e-12
+    erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=1) + 1e-12)
+    norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
     loss_phys = jnp.mean(erreur / norme)
 
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
