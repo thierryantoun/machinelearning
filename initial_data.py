@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from jax import random
-from network_parameters import K, x
+from network_parameters import K, T_target, x
 
 
 def make_sinus_u0(key):
@@ -30,13 +30,15 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         ks = jnp.arange(1, K+1)
         return jnp.sum(a_k[:, None] * jnp.sin(2*jnp.pi*ks[:, None]*x[None, :] + phase_k[:, None]), axis=0)
 
-    def make_ondulation_hf(subkey):
-        "Petite ondulation haute fréquence transportée par un fond constant (pas de choc dans le bloc)."
-        k1, k2, k3, k4 = random.split(subkey, 4)
-        c   = random.uniform(k1, (), minval=-1.0, maxval=1.0)        # fond : vitesse de transport
-        eps = random.uniform(k2, (), minval=0.005, maxval=0.02)      # petite amplitude
-        kc  = random.randint(k3, (), K + 1, x.shape[0] // 2)         # porteuse au-dessus de K
-        phi = random.uniform(k4, (), minval=0.0, maxval=2 * jnp.pi)
+    def make_ondulation_hf(subkey, n_blocs=1, T=T_target):
+        "Ondulation HF transportée par un fond constant, sans choc pendant n_blocs."
+        k1, k2, k3, k4, k5 = random.split(subkey, 5)
+        signe = jnp.sign(random.uniform(k1, (), minval=-1.0, maxval=1.0))
+        c   = signe * random.uniform(k2, (), minval=0.3, maxval=1.0)    # fond : vitesse de transport
+        kc  = random.randint(k3, (), K + 1, x.shape[0] // 2)            # porteuse au-dessus de K
+        eps_max = 1.0 / (2 * jnp.pi * kc * n_blocs * T)                 # t_choc > n_blocs * T
+        eps = random.uniform(k4, (), minval=0.3, maxval=0.9) * eps_max
+        phi = random.uniform(k5, (), minval=0.0, maxval=2 * jnp.pi)
         return c + eps * jnp.sin(2 * jnp.pi * kc * x + phi)
 
     def make_gaussiennes(subkey):
