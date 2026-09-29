@@ -57,6 +57,8 @@ class FNO1D(nn.Module):
 
     def __call__(self, u):
         x = u[:, None]
+        x_hat = jnp.fft.rfft(x, axis=0)[:self.kmax, :]
+        x = jnp.fft.irfft(x_hat, n=x.shape[0], axis=0)
         x = self.lifting(x)
         for block in self.blocks:
             x = block(x)
