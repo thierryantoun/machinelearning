@@ -25,7 +25,7 @@ batch_size = 64
 nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size
 
-lambda_hf   = 0.05
+lambda_hf   = 1.0
 lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
 
 # ------------------------------------------------------------------
@@ -36,7 +36,7 @@ lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièreme
 # correctement. Le réseau apprend ainsi �|  corriger ses propres erreurs
 # accumulées, pas seulement �|  reproduire des trajectoires "propres".
 # ------------------------------------------------------------------
-ONPOLICY_ENABLED       = True
+ONPOLICY_ENABLED       = False
 ONPOLICY_TRAJ          = N_TRAJ   # nb de trajectoires on-policy régénérées
 ONPOLICY_MAX_STEPS     = 40       # profondeur max de rollout modèle avant relabelling
 ONPOLICY_DEPTHS_PER_TRAJ = 4      # nb de profondeurs piochées par trajectoire (les 40 états
