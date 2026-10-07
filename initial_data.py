@@ -99,10 +99,10 @@ def generate_initial_data(key, nb_frequences=K, x=x):
          make_marches, make_creneau, make_riemann, make_sinus_hf],
         subkey,
     )
-    # constante (3) et sinus_hf (8) ne sont pas renormalisees : pour
-    # sinus_hf, sa petite amplitude eps est une caracteristique voulue
+    # constante (3) et ondulation_hf (8) ne sont pas renormalisees : pour
+    # ondulation_hf, sa petite amplitude eps est une caracteristique voulue
     # (pas de choc dans le bloc) que la renormalisation a max|u|=1 detruirait.
-    sans_normalisation = (ic_type == 3) | (ic_type == 8)
-    u = jnp.where(sans_normalisation, u, u / jnp.max(jnp.abs(u)))
+    skip_normalize = (ic_type == 3) | (ic_type == 8)
+    u = jnp.where(skip_normalize, u, u / jnp.max(jnp.abs(u)))
 
     return u

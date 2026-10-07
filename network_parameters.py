@@ -2,6 +2,8 @@ import argparse
 
 import jax.numpy as jnp
 
+from stencil import stencil_size
+
 _parser = argparse.ArgumentParser()
 _parser.add_argument("--model", choices=["fno", "lgno"], default="fno",
                       help="Modèle �|  utiliser : fno ou lgno")
@@ -11,17 +13,24 @@ MODEL = _args.model
 
 SOLVER = "burgers"   # "advection" ou "burgers"
 
-K          = 40
-N_TRAJ         = 100   # nombre de trajectoires longues
-MULTIPLE_STEPS = 200  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
+N_TRAJ         = 1   # nombre de trajectoires longues
+MULTIPLE_STEPS = 2  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
+alpha      = 40 / 128            # fraction de modes de Fourier gardés par le FNO (fixe)
+K          = int(alpha * n / 2)  # nb de modes (FNO et données initiales) : n=256 -> 40
 T          = 1
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-T_target   = 0.1
-batch_size = 64
+T_target   = 0.1               # lambda = T_target * n = 25.6 à n=256
+
+# Bornes des vitesses caractéristiques f'(u) = min u0, max u0 (cf. print de training.py)
+# -> taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la
+# sortie du réseau en dépendent. lambda=25.6, u0 in [-1, 1] -> P=25, Q=26 (52 cellules)
+A_MIN, A_MAX = -1.0, 1.0
+P, Q       = stencil_size(A_MIN, A_MAX, T_target * n)
+batch_size = min(64, N_TRAIN)   # borné pour les petits tests (N_TRAIN < 64)
 nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size
 

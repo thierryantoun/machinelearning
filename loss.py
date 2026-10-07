@@ -2,7 +2,8 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model
-from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, K, T_target
+from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, K, T_target, P, Q
+from stencil import stencil
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -11,19 +12,22 @@ else:
 
 dx = x[1] - x[0]
 
+# consistance locale exacte (§5.2) : F_{j+1/2} = f(wb_j) + sum_i c_{j,i} delta_{j,i}
+# fenêtre j constante -> delta_j = 0 -> F = f(c), quels que soient les c
 def predict_F(params, u0):
-    mean_u0 = jnp.mean(u0)
-    N      = model.apply(params, u0)
-    N_mean = model.apply(params, jnp.full_like(u0, mean_u0))
+    w     = stencil(u0, P, Q)                 # (n, P+Q+1) : u_{j-P}, ..., u_{j+Q}
+    wb    = jnp.mean(w, axis=-1)              # (n,) moyenne locale de chaque fenêtre
+    delta = w - wb[:, None]                   # (n, P+Q+1)
+    c     = model.apply(params, w)            # (n, P+Q+1)
     if SOLVER == "advection":
-        consistance = a * mean_u0
+        consistance = a * wb
     else:
-        consistance = mean_u0**2 / 2.0
-    return consistance + N - N_mean
+        consistance = wb**2 / 2.0
+    return consistance + jnp.sum(c * delta, axis=-1)
 
 
 Ktot  = n // 2 + 1
-kappa     = 0.5
+kappa     = 0.8
 k0        = int(kappa * Ktot)
 
 

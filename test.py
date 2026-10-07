@@ -168,7 +168,7 @@ multiple_steps_list = [max(1, round(t / T_target)) for t in PHYSICAL_TIMES]
 # plusieurs instants fixes du rollout, plutôt qu'un film complet.
 # Modifier SNAPSHOT_TIMES pour choisir les instants à tracer.
 # ------------------------------------------------------------------
-SNAPSHOT_TIMES = [0.5]  # temps physiques auxquels tracer un plot (ex: [1, 10, 50, 200])
+SNAPSHOT_TIMES = [0.01]  # temps physiques auxquels tracer un plot (ex: [1, 10, 50, 200])
 SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 
@@ -201,6 +201,91 @@ def make_snapshot(name, u0, t_phys):
 for name in SNAPSHOT_FUNCTIONS:
     for t_phys in SNAPSHOT_TIMES:
         make_snapshot(name, test_functions[name], t_phys)
+
+# ------------------------------------------------------------------
+# Films .mp4 : évolution de la cible et du modèle (pur et corrigé) bloc
+# par bloc jusqu'à MOVIE_TIME. Nécessite ffmpeg (binaire système, ou
+# `pip install imageio-ffmpeg` qui en fournit un).
+# ------------------------------------------------------------------
+MOVIE_TIME = 10.0          # temps physique final du film
+MOVIE_FPS = 20
+MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
+
+
+@partial(jax.jit, static_argnames=("n_steps", "correction_every"))
+def trajectories(u0, n_steps, correction_every=None):
+    """Comme error_growth, mais renvoie les champs à chaque bloc :
+    (u_true, u_model, u_corr), chacun de forme (n_steps + 1, n), u0 inclus."""
+    def block(carry, i):
+        u_true, u_model, u_corr = carry
+        u_true = solver(u_true)[0]
+        u_model, _ = step(u_model, T_target)
+        u_corr, _ = step(u_corr, T_target)
+        if correction_every:
+            do_correct = ((i + 1) % correction_every) == 0
+            u_corr = jax.lax.cond(do_correct, lambda uu: solver(uu)[0], lambda uu: uu, u_corr)
+        return (u_true, u_model, u_corr), (u_true, u_model, u_corr)
+
+    _, trajs = jax.lax.scan(block, (u0, u0, u0), jnp.arange(n_steps))
+    return tuple(jnp.concatenate([u0[None], tr], axis=0) for tr in trajs)
+
+
+def _movie_writer():
+    import matplotlib.animation as animation
+    if not animation.FFMpegWriter.isAvailable():
+        try:
+            import imageio_ffmpeg
+            plt.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
+        except ImportError:
+            raise RuntimeError("ffmpeg introuvable : installer ffmpeg ou `pip install imageio-ffmpeg`")
+    return animation.FFMpegWriter(fps=MOVIE_FPS, bitrate=2000)
+
+
+def make_movie(name, u0, t_final):
+    import numpy as np
+    from matplotlib.animation import FuncAnimation
+
+    n_steps = max(1, round(t_final / T_target))
+    has_corr = CORRECTION_EVERY > 0 and n_steps >= CORRECTION_EVERY
+    u_true, u_pred, u_corr = map(np.asarray, trajectories(
+        u0, n_steps, correction_every=CORRECTION_EVERY if has_corr else None))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
+    line_true, = ax.plot(x, u_true[0], label='cible', linewidth=1.5)
+    line_pred, = ax.plot(x, u_pred[0], label='prédit (pur)', linewidth=1.5, linestyle=':')
+    line_corr = None
+    if has_corr:
+        line_corr, = ax.plot(x, u_corr[0], label=f'prédit (corrigé/{CORRECTION_EVERY})',
+                             linewidth=1.5, linestyle='-.')
+    # Échelle verticale fixée sur la cible (le modèle pur peut diverger).
+    lo, hi = float(u_true.min()), float(u_true.max())
+    pad = 0.15 * (hi - lo + 1e-6)
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_xlabel('x')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right')
+    title = ax.set_title("")
+    fig.tight_layout()
+
+    def update(k):
+        line_true.set_ydata(u_true[k])
+        line_pred.set_ydata(u_pred[k])
+        if line_corr is not None:
+            line_corr.set_ydata(u_corr[k])
+        title.set_text(f"« {name} »  —  t={k * T_target:.2f}  (T_target={T_target})")
+        artists = [line_true, line_pred, title]
+        return artists + ([line_corr] if line_corr is not None else [])
+
+    anim = FuncAnimation(fig, update, frames=n_steps + 1, blit=False)
+    out_path = f"movie_{name}_t{t_final:g}.mp4"
+    anim.save(out_path, writer=_movie_writer(), dpi=120)
+    plt.close(fig)
+    print(f"Film sauvegardé : {out_path}")
+
+
+for name in MOVIE_FUNCTIONS:
+    make_movie(name, test_functions[name], MOVIE_TIME)
 
 if SOLVER != "advection":
     from burgers_solver import flux as _burgers_flux

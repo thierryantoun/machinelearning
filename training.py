@@ -7,11 +7,13 @@ import jax.numpy as jnp
 from jax import random
 import optax
 import pickle
+import math
 from network_parameters import (
-    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target,
+    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target, a, P, Q,
     ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
 )
 from initial_data import generate_initial_data
+from stencil import stencil_size
 from loss import model, loss_fn, make_train_step, predict_F
 
 if SOLVER == "advection":
@@ -36,6 +38,19 @@ key_init, key_train, key_val = random.split(key, 3)
 
 N_VAL_TRAJ = max(1, N_TRAJ // 5)
 N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
+
+# calcul stencil max sur tout le jeu de données pour savoir quelles valeurs prendre pour p et q
+# vitesses caractéristiques f'(u) : advection -> a constant, burgers -> u
+# les champs constants sont ignorés : rien ne s'y propage, et la consistance locale
+# donne déjà F = f(c) exactement (make_constante va jusqu'à |u| = 5, non renormalisé)
+def wave_speed_bounds(*datasets):
+    if SOLVER == "advection":
+        return a, a
+    u = jnp.concatenate(datasets, axis=0)
+    non_constant = (jnp.max(u, axis=1) - jnp.min(u, axis=1)) > 1e-8
+    u = u[non_constant]
+    return float(jnp.min(u)), float(jnp.max(u))
+
 
 
 def generate_trajectory(key):
@@ -123,6 +138,13 @@ u0s_validation      = u0s_traj_val.reshape(-1, x.shape[0])
 u_finals_validation = u_finals_traj_val.reshape(-1, x.shape[0])
 ts_validation       = ts_traj_val.reshape(-1)
 
+
+a_min, a_max = wave_speed_bounds(u0s_training, u_finals_training,
+                                 u0s_validation, u_finals_validation)
+lam  = float(T_target / dx)
+p, q = stencil_size(a_min, a_max, lam)
+print(f"Vitesses : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={lam:.4f} "
+      f"-> stencil p={p} (gauche), q={q} (droite), {p + q + 1} points")
 
 assert u0s_training.shape[0] == N_TRAIN
 n_batches     = max(1, N_TRAIN // batch_size)
@@ -224,7 +246,7 @@ if os.path.exists(CHECKPOINT_PATH):
         epochs_no_improve = ckpt["epochs_no_improve"]
         print(f"Reprise depuis l'epoch {start_epoch} (meilleure val: {best_val:.6f})")
 else:
-    params = model.init(key_init, jnp.ones(x.shape[0]))
+    params = model.init(key_init, jnp.ones((x.shape[0], P + Q + 1)))  # fenêtres (n, P+Q+1)
     opt_state = optimizer.init(params)
     start_epoch = 0
     losses_training, losses_validation = [], []
