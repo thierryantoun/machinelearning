@@ -9,23 +9,19 @@ from network_parameters import K, P, Q, n
 def multiply_one_mode(R_k, v_k):
     return R_k @ v_k
 
-
 class FNOBlock(nn.Module):
     width: int
-    kmax: int          # K0 : nb de modes à la résolution d'entraînement n0 (taille de la table R)
-    n0: int            # résolution d'entraînement
+    kmax: int
+    n0: int
     activation: callable
     init_fn: callable
 
     def setup(self):
         self.W = nn.Dense(features=self.width, use_bias=False)
-        self.R_real = self.param('R_real', self.init_fn, (self.kmax, self.width, self.width))
-        self.R_imag = self.param('R_imag', self.init_fn, (self.kmax, self.width, self.width))
+        if self.kmax > 0:
+            self.R_real = self.param('R_real', self.init_fn, (self.kmax, self.width, self.width))
+            self.R_imag = self.param('R_imag', self.init_fn, (self.kmax, self.width, self.width))
 
-    # noyau spectral en fréquence par cellule (§5.1) : R_tab est la table aux xi_i = i/n0,
-    # interpolée linéairement en xi_k = k/N avec K = kappa*N/2 modes. A N = n0 on retombe
-    # exactement sur la table ; à 2*n0 les modes pairs aussi. Au-delà du dernier point de
-    # la table (xi > (K0-1)/n0), on garde la dernière valeur.
     def spectral_kernel(self, N):
         R_tab = self.R_real + 1j * self.R_imag
         K_N = min(int(round(self.kmax * N / self.n0)), N // 2 + 1)
@@ -36,16 +32,16 @@ class FNOBlock(nn.Module):
         return (1 - w) * R_tab[i0] + w * R_tab[i1]
 
     def __call__(self, v):
-        N = v.shape[0]
-        R = self.spectral_kernel(N)                    # (K_N, width, width)
-        K_N = R.shape[0]
         Wv = self.W(v)
+        if self.kmax == 0:                              # contrôle : réseau purement local
+            return self.activation(Wv)
+        N = v.shape[0]
+        R = self.spectral_kernel(N)
+        K_N = R.shape[0]
         v_hat = jnp.fft.rfft(v, axis=0)[:K_N, :]
         RFv = jax.vmap(multiply_one_mode)(R, v_hat)
-        RFv_full = jnp.zeros((N // 2 + 1, self.width), dtype=jnp.complex64)
-        RFv_full = RFv_full.at[:K_N, :].set(RFv)
+        RFv_full = jnp.zeros((N // 2 + 1, self.width), dtype=jnp.complex64).at[:K_N, :].set(RFv)
         Finverse = jnp.fft.irfft(RFv_full, n=N, axis=0)
-
         return self.activation(Wv + Finverse)
 
 
