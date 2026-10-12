@@ -11,7 +11,8 @@ MODEL = _args.model
 
 SOLVER = "burgers"   # "advection" ou "burgers"
 
-K          = 40
+K          = 40   # nombre de fréquences des conditions initiales
+KMAX       = 40   # modes de Fourier gardés dans les blocs FNO (0 = pas de partie spectrale)
 N_TRAJ         = 100   # nombre de trajectoires longues
 MULTIPLE_STEPS = 200  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
