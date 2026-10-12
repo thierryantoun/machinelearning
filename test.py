@@ -244,17 +244,14 @@ print("=> invariance exacte OK" if exact_ok else
 # les fenêtres autour du choc sont identiques cellule par cellule à
 # 256, 512 et 1024 points (l'autre saut, en x = 0, est à >= 128 cellules,
 # hors de la fenêtre de P+Q+1 cellules). La partie LOCALE du réseau rend
-# donc la même sortie partout ; un écart entre résolutions ne peut venir
-# que de la partie non locale (branche spectrale R).
-#   - kmax = 0 : on attend un écart ~1e-6 (float32).
-#   - kmax > 0 : l'écart mesure l'effet longue portée de R.
+# donc la même sortie partout : on attend un écart ~1e-6 (float32).
 # ------------------------------------------------------------------
 CELL_HALF_WIDTH = 40          # cellules affichées de part et d'autre du saut
 CELL_FUNCTIONS  = ["riemann"]
 
 jj = jnp.arange(-CELL_HALF_WIDTH, CELL_HALF_WIDTH + 1)
 print(f"\n--- Riemann en cellules : écart max à N={RESOLUTIONS[0]}, sur ±{CELL_HALF_WIDTH} cellules du saut ---")
-print(f"    (kmax = 0 -> attendu ~1e-6 ; sinon : effet longue portée de la branche spectrale)")
+print(f"    (attendu ~1e-6 : réseau purement local)")
 for name in CELL_FUNCTIONS:
     fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
     ref_pred = ref_true = None

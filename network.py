@@ -1,63 +1,28 @@
-import numpy as np
-import jax
-import jax.numpy as jnp
 import flax.linen as nn
 
-from network_parameters import K, P, Q, n
+from network_parameters import P, Q
 
-
-def multiply_one_mode(R_k, v_k):
-    return R_k @ v_k
 
 class FNOBlock(nn.Module):
     width: int
-    kmax: int
-    n0: int
     activation: callable
-    init_fn: callable
 
     def setup(self):
         self.W = nn.Dense(features=self.width, use_bias=False)
-        if self.kmax > 0:
-            self.R_real = self.param('R_real', self.init_fn, (self.kmax, self.width, self.width))
-            self.R_imag = self.param('R_imag', self.init_fn, (self.kmax, self.width, self.width))
-
-    def spectral_kernel(self, N):
-        R_tab = self.R_real + 1j * self.R_imag
-        K_N = min(int(round(self.kmax * N / self.n0)), N // 2 + 1)
-        t   = np.minimum(np.arange(K_N) * self.n0 / N, self.kmax - 1)
-        i0  = np.floor(t).astype(np.int32)
-        i1  = np.minimum(i0 + 1, self.kmax - 1)
-        w   = (t - i0).astype(np.float32)[:, None, None]
-        return (1 - w) * R_tab[i0] + w * R_tab[i1]
 
     def __call__(self, v):
-        Wv = self.W(v)
-        if self.kmax == 0:                              # contrôle : réseau purement local
-            return self.activation(Wv)
-        N = v.shape[0]
-        R = self.spectral_kernel(N)
-        K_N = R.shape[0]
-        v_hat = jnp.fft.rfft(v, axis=0)[:K_N, :]
-        RFv = jax.vmap(multiply_one_mode)(R, v_hat)
-        RFv_full = jnp.zeros((N // 2 + 1, self.width), dtype=jnp.complex64).at[:K_N, :].set(RFv)
-        Finverse = jnp.fft.irfft(RFv_full, n=N, axis=0)
-        return self.activation(Wv + Finverse)
+        return self.activation(self.W(v))
 
 
 class FNO1D(nn.Module):
     activation: callable
-    init_fn: callable
     dv: int
-    kmax: int
-    n0: int = n
     n_blocks: int = 4
 
     def setup(self):
         self.lifting = nn.Dense(features=self.dv, use_bias=True)
         self.blocks = [
-            FNOBlock(width=self.dv, kmax=self.kmax, n0=self.n0, activation=self.activation,
-                     init_fn=self.init_fn)
+            FNOBlock(width=self.dv, activation=self.activation)
             for _ in range(self.n_blocks)
         ]
         self.projection = nn.Dense(features=P + Q + 1, use_bias=True)
@@ -70,4 +35,4 @@ class FNO1D(nn.Module):
         return self.projection(x)
 
 
-model = FNO1D(kmax=K, n0=n, activation=nn.gelu, init_fn=nn.initializers.lecun_normal(), dv=64)
+model = FNO1D(activation=nn.gelu, dv=64)

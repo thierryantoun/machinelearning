@@ -4,7 +4,6 @@ from network_parameters import x, cfl
 
 dx = x[1] - x[0]
 
-
 def flux(u_L, u_R):
     s_L = jnp.minimum(u_L, u_R)
     s_R = jnp.maximum(u_L, u_R)
@@ -16,9 +15,9 @@ def flux(u_L, u_R):
         )
     )
 
-
 @jax.jit
 def burgers_solver(u, T_target):
+    dx = 1.0 / u.shape[-1]   # domaine périodique [0, 1) : vaut x[1]-x[0] à n=256, suit la grille sinon
 
     def cond_fn(carry):
         u, t, F = carry
