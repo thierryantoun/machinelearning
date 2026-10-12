@@ -72,26 +72,7 @@ def model_step(params, u):
 
 @jax.jit
 def generate_onpolicy_pairs(key, params):
-    """Corrige l'exposure bias : on déroule le modèle COURANT (params) depuis
-    des IC fraîches pendant ONPOLICY_MAX_STEPS pas (arrêt de gradient, ce
-    n'est que de la génération de données), puis on interroge le vrai solveur
-    depuis l'état atteint pour obtenir le label correct. Le réseau apprend
-    ainsi à corriger ses propres états dérivés, pas seulement à reproduire des
-    trajectoires toujours "propres".
-
-    Garde-fou NaN/Inf : un modèle instable (surtout en tout début d'entraînement,
-    params quasi aléatoires) peut diverger pendant le déroulé. Un seul NaN dans
-    le batch casserait tous les params au gradient step suivant (le clip de
-    gradient ne protège pas contre NaN, seulement contre les gradients énormes
-    mais finis). Toute paire non-finie est donc remplacée par l'IC propre et
-    son vrai label (garantis finis) avant d'être renvoyée.
-
-    Les ONPOLICY_MAX_STEPS états intermédiaires de chaque trajectoire sont
-    calculés de toute façon (déroulé séquentiel) : on en garde
-    ONPOLICY_DEPTHS_PER_TRAJ par trajectoire (profondeurs tirées au hasard)
-    au lieu d'un seul, ce qui multiplie le nombre de paires sans coût
-    supplémentaire de déroulé (seul le ré-étiquetage par le vrai solveur,
-    qui lui coûte réellement, scale avec ce nombre)."""
+    
     key_ic, key_depth = random.split(key)
     ics = jax.vmap(generate_initial_data)(random.split(key_ic, ONPOLICY_TRAJ))
 
