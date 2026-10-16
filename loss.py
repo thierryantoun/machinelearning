@@ -12,18 +12,19 @@ else:
 
 dx = x[1] - x[0]
 
-# consistance locale exacte (§5.2) : F_{j+1/2} = f(wb_j) + sum_i c_{j,i} delta_{j,i}
-# fenêtre j constante -> delta_j = 0 -> F = f(c), quels que soient les c
+# F_{j+1/2} = f(wb_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
+# fenêtre j constante -> w_j = w_bar_j -> F = f(wb_j), quels que soient les poids
 def predict_F(params, u0):
-    w     = stencil(u0, P, Q)                 # (n, P+Q+1) : u_{j-P}, ..., u_{j+Q}
-    wb    = jnp.mean(w, axis=-1)              # (n,) moyenne locale de chaque fenêtre
-    delta = w - wb[:, None]                   # (n, P+Q+1)
-    c     = model.apply(params, w)            # (n, P+Q+1)
+    w     = stencil(u0, P, Q)                         # (n, P+Q+1)
+    wb    = jnp.mean(w, axis=-1)                      # (n,)
+    w_bar = jnp.broadcast_to(wb[:, None], w.shape)    # fenêtre constante (wb, ..., wb)
+    N     = model.apply(params, w)                    # (n,)
+    N_bar = model.apply(params, w_bar)                # (n,)
     if SOLVER == "advection":
         consistance = a * wb
     else:
         consistance = wb**2 / 2.0
-    return consistance + jnp.sum(c * delta, axis=-1)
+    return consistance + N - N_bar
 
 
 Ktot  = n // 2 + 1

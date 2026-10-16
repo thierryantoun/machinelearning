@@ -25,14 +25,14 @@ class FNO1D(nn.Module):
             FNOBlock(width=self.dv, activation=self.activation)
             for _ in range(self.n_blocks)
         ]
-        self.projection = nn.Dense(features=P + Q + 1, use_bias=True)
+        self.projection = nn.Dense(features=1, use_bias=True)
 
-    # w : fenêtres stencil(u0, P, Q), (n, P+Q+1) -> coefficients c_{j,i}, (n, P+Q+1)
+    # w : fenêtres stencil(u0, P, Q), (n, P+Q+1) -> N[w], (n,)
     def __call__(self, w):
         x = self.lifting(w)
         for block in self.blocks:
             x = block(x)
-        return self.projection(x)
+        return self.projection(x)[..., 0]
 
 
 model = FNO1D(activation=nn.gelu, dv=64)
