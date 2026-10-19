@@ -15,7 +15,7 @@ dx = x[1] - x[0]
 # fenêtre j constante -> w_j = w_bar_j -> F = f(wb_j), quels que soient les poids
 def predict_F(params, u0):
     S     = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
-    wb    = (S[P + Q + 1:] - S[:n]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
+    wb    = (S[P + Q + 1:] - S[:u0.shape[-1]]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
     N     = model.apply(params, u0)                   # (n,) convolution sur u0
     N_bar = model.apply(params, wb, method=FNO1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
     if SOLVER == "advection":
