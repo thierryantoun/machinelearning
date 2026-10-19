@@ -51,8 +51,6 @@ def wave_speed_bounds(*datasets):
     u = u[non_constant]
     return float(jnp.min(u)), float(jnp.max(u))
 
-
-
 def generate_trajectory(key):
     "Trajectoire de MULTIPLE_STEPS blocs, chacun integre sur le meme temps physique T_target."
     u0 = generate_initial_data(key)
@@ -227,7 +225,7 @@ if os.path.exists(CHECKPOINT_PATH):
         epochs_no_improve = ckpt["epochs_no_improve"]
         print(f"Reprise depuis l'epoch {start_epoch} (meilleure val: {best_val:.6f})")
 else:
-    params = model.init(key_init, jnp.ones((x.shape[0], P + Q + 1)))  # fenêtres (n, P+Q+1)
+    params = model.init(key_init, jnp.ones(x.shape[0]))  # champ u, (n,)
     opt_state = optimizer.init(params)
     start_epoch = 0
     losses_training, losses_validation = [], []
