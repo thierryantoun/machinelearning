@@ -1,6 +1,5 @@
 import flax.linen as nn
 import jax.numpy as jnp
-from jax import lax
 
 from network_parameters import P, Q
 
@@ -24,9 +23,8 @@ class FNO1D(nn.Module):
     q: int = Q   # points à droite
 
     def setup(self):
-        # taille du noyau - canaux d'entrée - canaux de sortie : (p+q+1, 1, dv)
-        self.kernel = self.param("kernel", nn.initializers.lecun_normal(), (self.p + self.q + 1, 1, self.dv))
-        self.bias   = self.param("bias", nn.initializers.zeros, (self.dv,))
+        # lifting : conv de noyau p+q+1, 1 canal -> dv canaux
+        self.lifting = nn.Conv(features=self.dv, kernel_size=(self.p + self.q + 1,), padding="VALID", use_bias=True)
         self.blocks = [
             FNOBlock(width=self.dv, activation=self.activation)
             for _ in range(self.n_blocks)
@@ -39,18 +37,17 @@ class FNO1D(nn.Module):
             x = block(x)
         return self.projection(x)[..., 0]
 
+    # u : (n,) -> N, (n,) ; p cellules fantomes à gauche et q à droite pour la périodicité
     def __call__(self, u):
-        u_pad = jnp.pad(u, (self.p, self.q), mode="wrap")[None, :, None]   # cellules fantomes pour la périodicité de la conv
-        # conv bas niveau pour imposer le nbr de cellules fantomes & pour avoir le noyau à dispo
-        x = lax.conv_general_dilated(u_pad, self.kernel, window_strides=(1,), padding="VALID",
-                                     dimension_numbers=("NWC", "WIO", "NWC"))[0]   # (NWC -> 1,n+p+q,1) -> (WIO -> p+q+1,1,dv) -> (NWC -> 1,n,dv)
-        return self._head(x + self.bias)
+        u = jnp.pad(u, (self.p, self.q), mode="wrap")
+        return self._head(self.lifting(u[..., None]))
 
     # c : (n,) -> N évalué en j sur la fenêtre constante (c_j, ..., c_j), (n,)
-    # la convolution d'une fenêtre constante vaut c_j * sum(kernel) + bias
+    # la conv d'une fenêtre constante vaut c_j * sum_k kernel[k] + bias
     def constant(self, c):
-        x = c[:, None] * jnp.sum(self.kernel, axis=(0, 1)) + self.bias   # (n, dv)
-        return self._head(x)
+        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 1, dv)
+        bias   = self.lifting.variables["params"]["bias"]     # (dv,)
+        return self._head(c[:, None] * jnp.sum(kernel, axis=(0, 1)) + bias)
 
 
 model = FNO1D(activation=nn.gelu, dv=64)
