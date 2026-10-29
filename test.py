@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from network_parameters import SOLVER, T_target, n, cfl
+from network_parameters import SOLVER, T_target, n, cfl, T
 from loss import predict_F
 
 if SOLVER == "advection":
@@ -22,8 +22,8 @@ with open("params_fno.pkl", "rb") as f:
 # étape 2) : le modèle est entraîné à n = N0, puis évalué SANS
 # réentraînement sur d'autres grilles avec T_N = LAMBDA / N.
 # Domaine périodique [0, 1) -> dx = 1 / N. Les mêmes P, Q (fenêtre en
-# cellules) servent sur toutes les grilles ; le nombre de modes du FNO
-# suit N (K = kappa N / 2, R interpolé, cf. network.py).
+# cellules) servent sur toutes les grilles : le noyau de la conv (P+Q+1
+# poids) est le même quelle que soit N.
 #
 # Tout ce qui dépend de la grille (dx, T, nombre de pas) est déduit de la
 # taille de u : les fonctions jit ci-dessous se recompilent une fois par
@@ -70,72 +70,76 @@ def solver_rollout(u0, n_steps):
     return u_target
 
 
-@partial(jax.jit, static_argnames=("n_steps", "correction_every"))
-def model_rollout(u0, n_steps, correction_every=None):
-    """Rollout du modèle. Si correction_every est donné, tous les
-    `correction_every` blocs la solution est réinjectée un pas dans le vrai
-    schéma numérique à la place de la prédiction du modèle."""
-    def model_block(u, i):
-        u_next = step(u)
-        if correction_every:
-            do_correct = ((i + 1) % correction_every) == 0
-            u_next = jax.lax.cond(do_correct, lambda uu: solver(uu)[0], lambda uu: uu, u_next)
-        return u_next, None
-    u_pred, _ = jax.lax.scan(model_block, u0, jnp.arange(n_steps))
-    return u_pred
+PRINT_TCFL = True   # debug : affiche max|u| et T_cfl à chaque bloc de model_rollout (ralentit, et le bench aussi)
 
 
-CORRECTION_EVERY = 0
+@jax.jit
+def model_rollout(u0, t_final=T):
+    """Rollout à pas CFL adaptatif jusqu'au temps physique t_final.
+
+    Invariance d'échelle de Burgers : v(x, t) = alpha u(x, alpha t). Pour tout
+    alpha >= max|u|, u / alpha a une vitesse max <= 1 (domaine d'entraînement) ;
+    un bloc du modèle sur u / alpha (lambda inchangé) fait avancer u de T_N / alpha.
+      - alpha = max|u|                  -> pas T_cfl = T_N / max|u| (cône = stencil)
+      - alpha = T_N / (t_final - t)     -> dernier pas raccourci pour tomber pile sur t_final
+    On prend le plus grand des deux : le pas ne dépasse jamais T_cfl ni t_final,
+    et max|u| -> 0 ne pose pas de problème (le pas est borné par le temps restant).
+
+    Renvoie (u(t_final), nombre de blocs).
+    """
+    T_N = T_of(u0.shape[-1])
+
+    def cond_fn(carry):
+        _, t, _ = carry
+        return t < t_final
+
+    def body_fn(carry):
+        u, t, n_blocks = carry
+        u_max = jnp.max(jnp.abs(u))
+        alpha = jnp.maximum(u_max, T_N / (t_final - t))
+        if PRINT_TCFL:
+            jax.debug.print("  bloc {b:4d}  t={t:9.4f}  max|u|={m:.4f}  T_cfl={tc:.4f}  pas pris={dt:.4f}",
+                            b=n_blocks, t=t, m=u_max, tc=T_N / u_max, dt=T_N / alpha, ordered=True)
+        u_next = alpha * step(u / alpha)          # normalise, bloc du modèle, remise à l'échelle
+        return u_next, t + T_N / alpha, n_blocks + 1
+
+    u_pred, _, n_blocks = jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
+    return u_pred, n_blocks
 
 
-@partial(jax.jit, static_argnames=("n_steps", "correction_every"))
-def error_growth(u0, n_steps, correction_every=None):
+@partial(jax.jit, static_argnames=("n_steps",))
+def error_growth(u0, n_steps):
     """Croissance de l'erreur bloc par bloc.
 
-    On avance en parallèle trois trajectoires depuis le même u0 :
+    On avance en parallèle deux trajectoires depuis le même u0 :
       - u_true  : le vrai schéma numérique (référence) ;
-      - u_model : le modèle pur ;
-      - u_corr  : le modèle avec réinjection un pas dans le vrai schéma
-                  tous les `correction_every` blocs.
-    À chaque bloc on mesure la norme L2 physique de (u_model − u_true),
-    (u_corr − u_true) et de u_true.
+      - u_model : le modèle.
+    À chaque bloc on mesure la norme L2 physique de (u_model − u_true) et de u_true.
 
-    Renvoie (errs_pur, errs_corr, norms_true), chacun de longueur n_steps.
+    Renvoie (errs, norms_true), chacun de longueur n_steps.
     """
-    def block(carry, i):
-        u_model, u_corr, u_true = carry
+    def block(carry, _):
+        u_model, u_true = carry
         u_true_next = solver(u_true)[0]
         u_model_next = step(u_model)
-        u_corr_next = step(u_corr)
-        if correction_every:
-            do_correct = ((i + 1) % correction_every) == 0
-            u_corr_next = jax.lax.cond(
-                do_correct, lambda uu: solver(uu)[0], lambda uu: uu, u_corr_next
-            )
-        errs = (l2(u_model_next - u_true_next), l2(u_corr_next - u_true_next), l2(u_true_next))
-        return (u_model_next, u_corr_next, u_true_next), errs
+        errs = (l2(u_model_next - u_true_next), l2(u_true_next))
+        return (u_model_next, u_true_next), errs
 
-    _, (errs_pur, errs_corr, norms_true) = jax.lax.scan(
-        block, (u0, u0, u0), jnp.arange(n_steps)
-    )
-    return errs_pur, errs_corr, norms_true
+    _, (errs, norms_true) = jax.lax.scan(block, (u0, u0), None, length=n_steps)
+    return errs, norms_true
 
 
-@partial(jax.jit, static_argnames=("n_steps", "correction_every"))
-def trajectories(u0, n_steps, correction_every=None):
+@partial(jax.jit, static_argnames=("n_steps",))
+def trajectories(u0, n_steps):
     """Comme error_growth, mais renvoie les champs à chaque bloc :
-    (u_true, u_model, u_corr), chacun de forme (n_steps + 1, N), u0 inclus."""
-    def block(carry, i):
-        u_true, u_model, u_corr = carry
+    (u_true, u_model), chacun de forme (n_steps + 1, N), u0 inclus."""
+    def block(carry, _):
+        u_true, u_model = carry
         u_true = solver(u_true)[0]
         u_model = step(u_model)
-        u_corr = step(u_corr)
-        if correction_every:
-            do_correct = ((i + 1) % correction_every) == 0
-            u_corr = jax.lax.cond(do_correct, lambda uu: solver(uu)[0], lambda uu: uu, u_corr)
-        return (u_true, u_model, u_corr), (u_true, u_model, u_corr)
+        return (u_true, u_model), (u_true, u_model)
 
-    _, trajs = jax.lax.scan(block, (u0, u0, u0), jnp.arange(n_steps))
+    _, trajs = jax.lax.scan(block, (u0, u0), None, length=n_steps)
     return tuple(jnp.concatenate([u0[None], tr], axis=0) for tr in trajs)
 
 
@@ -282,7 +286,7 @@ for name in CELL_FUNCTIONS:
     print(f"Figure sauvegardée : {out_path}")
 
 # ------------------------------------------------------------------
-# Snapshots : cible vs modèle (pur et corrigé) après n_blocks blocs, un
+# Snapshots : cible vs modèle après n_blocks blocs, un
 # panneau par résolution. Un bloc dure T_N = LAMBDA / N : n_blocks = 1 donne
 # N=256 à T=0.1, N=512 à T=0.05, N=1024 à T=0.025 (même lambda, même nombre
 # de pas -> c'est la comparaison directe de l'invariance du doc §2).
@@ -296,17 +300,13 @@ def make_snapshot(name, n_steps):
                              sharey=True, squeeze=False)
     for ax, N in zip(axes[0], RESOLUTIONS):
         x, u0 = grids[N], test_functions[N][name]
-        has_corr = CORRECTION_EVERY > 0 and n_steps >= CORRECTION_EVERY
 
         u_true = solver_rollout(u0, n_steps)
-        u_pred = model_rollout(u0, n_steps)
-        u_corr = model_rollout(u0, n_steps, correction_every=CORRECTION_EVERY) if has_corr else None
+        u_pred, _ = model_rollout(u0, n_steps * T_of(N))   # même temps physique que la cible
 
         ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
         ax.plot(x, u_true, label='cible', linewidth=1.5)
-        ax.plot(x, u_pred, label='prédit (pur)', linewidth=1.5, linestyle=':')
-        if has_corr:
-            ax.plot(x, u_corr, label=f'prédit (corrigé/{CORRECTION_EVERY})', linewidth=1.5, linestyle='-.')
+        ax.plot(x, u_pred, label='prédit', linewidth=1.5, linestyle=':')
         ax.set_xlabel('x')
         ax.grid(True, alpha=0.3)
         ax.set_title(f"N={N}, T={T_of(N):g}, {n_steps} pas  (t={n_steps * T_of(N):g})")
@@ -352,18 +352,12 @@ def make_movie(name, N, t_final):
     x, u0 = grids[N], test_functions[N][name]
     T_N = T_of(N)
     n_steps = n_steps_of(t_final, N)
-    has_corr = CORRECTION_EVERY > 0 and n_steps >= CORRECTION_EVERY
-    u_true, u_pred, u_corr = map(np.asarray, trajectories(
-        u0, n_steps, correction_every=CORRECTION_EVERY if has_corr else None))
+    u_true, u_pred = map(np.asarray, trajectories(u0, n_steps))
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
     line_true, = ax.plot(x, u_true[0], label='cible', linewidth=1.5)
-    line_pred, = ax.plot(x, u_pred[0], label='prédit (pur)', linewidth=1.5, linestyle=':')
-    line_corr = None
-    if has_corr:
-        line_corr, = ax.plot(x, u_corr[0], label=f'prédit (corrigé/{CORRECTION_EVERY})',
-                             linewidth=1.5, linestyle='-.')
+    line_pred, = ax.plot(x, u_pred[0], label='prédit', linewidth=1.5, linestyle=':')
     # Échelle verticale fixée sur la cible (le modèle pur peut diverger).
     lo, hi = float(u_true.min()), float(u_true.max())
     pad = 0.15 * (hi - lo + 1e-6)
@@ -377,11 +371,8 @@ def make_movie(name, N, t_final):
     def update(k):
         line_true.set_ydata(u_true[k])
         line_pred.set_ydata(u_pred[k])
-        if line_corr is not None:
-            line_corr.set_ydata(u_corr[k])
         title.set_text(f"« {name} »  —  N={N}  t={k * T_N:.2f}  (T={T_N:g})")
-        artists = [line_true, line_pred, title]
-        return artists + ([line_corr] if line_corr is not None else [])
+        return [line_true, line_pred, title]
 
     anim = FuncAnimation(fig, update, frames=n_steps + 1, blit=False)
     out_path = f"movie_{name}_N{N}_t{t_final:g}.mp4"
@@ -426,26 +417,24 @@ if SOLVER != "advection":
 
         return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
 
-    print("\n--- Perf : modèle (blocs T_N) vs solveur pas-à-pas ---")
+    print("\n--- Perf : modèle (blocs CFL adaptatifs) vs solveur pas-à-pas ---")
     for N in RESOLUTIONS:
         for name in FUNCTION_NAMES:
             u0 = test_functions[N][name]
             for t_phys in PHYSICAL_TIMES:
-                n_steps_model = n_steps_of(t_phys, N)
-
-                u_model, t_model = _bench(model_rollout, u0, n_steps_model)
+                (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
                 (u_solver, _, n_dt_steps), t_solver = _bench(burgers_rollout_cfl, u0, t_phys)
 
                 mse = float(jnp.mean((u_model - u_solver) ** 2))
                 mse_norm = mse / (float(jnp.mean(u_solver ** 2)) + 1e-12)
                 speedup = t_solver / t_model if t_model > 0 else float('nan')
-                print(f"[N={N}] [{name}] t={t_phys:g}  modèle={n_steps_model} blocs ({t_model*1e3:.2f}ms)  "
+                print(f"[N={N}] [{name}] t={t_phys:g}  modèle={int(n_steps_model)} blocs ({t_model*1e3:.2f}ms)  "
                       f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  MSE={mse:.6f}  "
                       f"MSE_norm={mse_norm:.6f}  (×{speedup:.1f})")
 
 # ------------------------------------------------------------------
 # Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
-# rollout, avec et sans correction.
+# rollout.
 #   E_B(t)   = Σ_{k∈bande} |û(k,t)|²
 #   ε_B(t)   = |E_B,pred(t) − E_B,true(t)| / (E_B,true(t) + ε)
 # Les bandes sont en nombre d'onde PHYSIQUE k (le même sur toutes les
@@ -475,7 +464,7 @@ def band_error(u_pred, u_true):
     return {name: jnp.abs(e_pred[name] - e_true[name]) / (e_true[name] + EPS_BAND) for name in FREQ_BANDS}
 
 
-def print_band_table(title, correction_every):
+def print_band_table(title):
     print(f"\n--- {title} ---")
     print(f"{'N':>6}{'traj':>14}{'t':>8}{'n_steps':>9}" + "".join(f"{b:>11}" for b in FREQ_BANDS))
     for N in RESOLUTIONS:
@@ -484,16 +473,13 @@ def print_band_table(title, correction_every):
             for t_phys in PHYSICAL_TIMES:
                 n_steps = n_steps_of(t_phys, N)
                 u_true = solver_rollout(u0, n_steps)
-                u_pred = model_rollout(u0, n_steps, correction_every=correction_every)
+                u_pred, _ = model_rollout(u0, n_steps * T_of(N))   # même temps physique que la cible
                 errs = band_error(u_pred, u_true)
                 print(f"{N:>6}{name:>14}{t_phys:>8g}{n_steps:>9}"
                       + "".join(f"{float(errs[b]):>11.2e}" for b in FREQ_BANDS))
 
 
-print_band_table("Erreur par bande de fréquence — SANS correction", correction_every=None)
-if CORRECTION_EVERY > 0:
-    print_band_table(f"Erreur par bande de fréquence — AVEC correction (every={CORRECTION_EVERY})",
-                     correction_every=CORRECTION_EVERY)
+print_band_table("Erreur par bande de fréquence")
 
 # ------------------------------------------------------------------
 # Croissance de l'erreur ‖û_n − u_n(vrai)‖_L2 en fonction du temps physique
@@ -512,7 +498,7 @@ for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
     for N in RESOLUTIONS:
         n_steps_err = n_steps_of(error_growth_time, N)
         t_n = jnp.arange(1, n_steps_err + 1) * T_of(N)
-        errs_pur, _, _ = error_growth(test_functions[N][name], n_steps_err)
+        errs_pur, _ = error_growth(test_functions[N][name], n_steps_err)
         ax.plot(t_n, errs_pur, linewidth=1.5, label=f"N={N}")
         print(f"[{name}] N={N} ‖ε‖_L2 : t={T_of(N):g} → {float(errs_pur[0]):.3e}   "
               f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")

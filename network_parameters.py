@@ -13,13 +13,13 @@ MODEL = _args.model
 
 SOLVER = "burgers"   # "advection" ou "burgers"
 
-N_TRAJ         = 1   # nombre de trajectoires longues
-MULTIPLE_STEPS = 2  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
+K          = 40   # nombre de fréquences des conditions initiales (initial_data.py), sans lien avec le réseau
+
+N_TRAJ         = 10000  # nombre de trajectoires longues
+MULTIPLE_STEPS = 200  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
-alpha      = 40 / 128            # fraction de modes de Fourier gardés par le FNO (fixe)
-K          = int(alpha * n / 2)  # nb de modes (FNO et données initiales) : n=256 -> 40
-T          = 1
+T          = 5     # temps physique final des rollouts à pas CFL adaptatif (test.py)
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
