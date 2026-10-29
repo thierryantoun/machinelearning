@@ -17,6 +17,13 @@ else:
 with open("params_fno.pkl", "rb") as f:
     params = pickle.load(f)
 
+# Params entraînés avec l'ancienne version (noyau déclaré à la main : params/kernel, params/bias)
+# -> rangés sous params/lifting pour le nn.Conv actuel. Même calcul, écart 0.
+if "kernel" in params["params"]:
+    p = dict(params["params"])
+    p["lifting"] = {"kernel": p.pop("kernel"), "bias": p.pop("bias")}
+    params = {"params": p}
+
 # ------------------------------------------------------------------
 # Évaluation multi-résolution à lambda = T / dx fixé (doc §2, protocole
 # étape 2) : le modèle est entraîné à n = N0, puis évalué SANS
@@ -30,7 +37,7 @@ with open("params_fno.pkl", "rb") as f:
 # résolution, rien d'autre à changer.
 # ------------------------------------------------------------------
 LAMBDA      = float(T_target * n)   # 25.6 à l'entraînement (n=256, T=0.1)
-RESOLUTIONS = [256, 512, 1024]
+RESOLUTIONS = [256]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
 
 
 def make_grid(N):
@@ -70,9 +77,6 @@ def solver_rollout(u0, n_steps):
     return u_target
 
 
-PRINT_TCFL = True   # debug : affiche max|u| et T_cfl à chaque bloc de model_rollout (ralentit, et le bench aussi)
-
-
 @jax.jit
 def model_rollout(u0, t_final=T):
     """Rollout à pas CFL adaptatif jusqu'au temps physique t_final.
@@ -95,11 +99,7 @@ def model_rollout(u0, t_final=T):
 
     def body_fn(carry):
         u, t, n_blocks = carry
-        u_max = jnp.max(jnp.abs(u))
-        alpha = jnp.maximum(u_max, T_N / (t_final - t))
-        if PRINT_TCFL:
-            jax.debug.print("  bloc {b:4d}  t={t:9.4f}  max|u|={m:.4f}  T_cfl={tc:.4f}  pas pris={dt:.4f}",
-                            b=n_blocks, t=t, m=u_max, tc=T_N / u_max, dt=T_N / alpha, ordered=True)
+        alpha = jnp.maximum(jnp.max(jnp.abs(u)), T_N / (t_final - t))
         u_next = alpha * step(u / alpha)          # normalise, bloc du modèle, remise à l'échelle
         return u_next, t + T_N / alpha, n_blocks + 1
 
@@ -183,7 +183,7 @@ test_functions = {N: make_test_functions(grids[N]) for N in RESOLUTIONS}
 FUNCTION_NAMES = list(test_functions[RESOLUTIONS[0]])
 
 # Temps physiques fixes : n_steps = round(t / T_N) dépend de la grille.
-PHYSICAL_TIMES = [0.1, 1, 5, 10, 200]
+PHYSICAL_TIMES = [T]   # T de network_parameters ; ex. [0.1, 1, T] pour plusieurs horizons
 
 print(f"lambda = {LAMBDA:g} fixé ; " + ", ".join(
     f"N={N} : T={T_of(N):g}, {make_grid(N).shape[0]} points" for N in RESOLUTIONS))
@@ -291,7 +291,7 @@ for name in CELL_FUNCTIONS:
 # N=256 à T=0.1, N=512 à T=0.05, N=1024 à T=0.025 (même lambda, même nombre
 # de pas -> c'est la comparaison directe de l'invariance du doc §2).
 # ------------------------------------------------------------------
-SNAPSHOT_BLOCKS = [1]   # nombres de blocs (ex: [1, 10, 100])
+SNAPSHOT_BLOCKS = [10]   # nombres de blocs (ex: [1, 10, 100])
 SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 
@@ -328,7 +328,8 @@ for name in SNAPSHOT_FUNCTIONS:
 # MOVIE_TIME, un film par (fonction, résolution). Nécessite ffmpeg
 # (binaire système, ou `pip install imageio-ffmpeg`).
 # ------------------------------------------------------------------
-MOVIE_TIME = 10.0          # temps physique final du film
+MAKE_MOVIES = False    # films désactivés ; True pour les générer
+MOVIE_TIME = 0         # temps physique final du film
 MOVIE_FPS = 20
 MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 MOVIE_RESOLUTIONS = [RESOLUTIONS[0]]   # films coûteux : par défaut la grille d'entraînement seule
@@ -381,16 +382,17 @@ def make_movie(name, N, t_final):
     print(f"Film sauvegardé : {out_path}")
 
 
-for N in MOVIE_RESOLUTIONS:
-    for name in MOVIE_FUNCTIONS:
-        make_movie(name, N, MOVIE_TIME)
+if MAKE_MOVIES:
+    for N in MOVIE_RESOLUTIONS:
+        for name in MOVIE_FUNCTIONS:
+            make_movie(name, N, MOVIE_TIME)
 
-# Films supplémentaires aux grilles fines (T_N = 0.05 à N=512, 0.025 à N=1024).
-EXTRA_MOVIE_FUNCTIONS = ["riemann", "carre"]
-EXTRA_MOVIE_RESOLUTIONS = [512, 1024]
-for N in EXTRA_MOVIE_RESOLUTIONS:
-    for name in EXTRA_MOVIE_FUNCTIONS:
-        make_movie(name, N, MOVIE_TIME)
+    # Films supplémentaires aux grilles fines (T_N = 0.05 à N=512, 0.025 à N=1024).
+    EXTRA_MOVIE_FUNCTIONS = ["riemann", "carre"]
+    EXTRA_MOVIE_RESOLUTIONS = [N for N in (512, 1024) if N in RESOLUTIONS]   # vide si on reste à 256
+    for N in EXTRA_MOVIE_RESOLUTIONS:
+        for name in EXTRA_MOVIE_FUNCTIONS:
+            make_movie(name, N, MOVIE_TIME)
 
 if SOLVER != "advection":
     from burgers_solver import flux as _burgers_flux
