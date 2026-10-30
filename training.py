@@ -68,9 +68,12 @@ def model_step(params, u):
     return u - (T_target / dx) * (F - jnp.roll(F, 1, axis=-1))
 
 
+EPS_MAXPRINCIPLE = 0.05   # tolérance de dépassement de [min u0, max u0]
+
+
 @jax.jit
 def generate_onpolicy_pairs(key, params):
-    
+
     key_ic, key_depth = random.split(key)
     ics = jax.vmap(generate_initial_data)(random.split(key_ic, ONPOLICY_TRAJ))
 
@@ -79,11 +82,21 @@ def generate_onpolicy_pairs(key, params):
             u_next = model_step(params, u)
             return u_next, u_next
         _, states = jax.lax.scan(body, u0, None, length=ONPOLICY_MAX_STEPS)
-        return states  # (ONPOLICY_MAX_STEPS, n) : état après 1..ONPOLICY_MAX_STEPS pas modèle
+        return jnp.concatenate([u0[None], states], axis=0)  # (ONPOLICY_MAX_STEPS+1, n), indice 0 = IC
 
-    all_states = jax.vmap(rollout_model)(ics)  # (ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, n)
-    depths = random.randint(key_depth, (ONPOLICY_TRAJ, ONPOLICY_DEPTHS_PER_TRAJ), 0, ONPOLICY_MAX_STEPS)
-    gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps,n),(k,) -> (k,n)
+    all_states = jax.vmap(rollout_model)(ics)  # (ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS+1, n)
+
+    # principe du maximum : un état hors [min u0, max u0] (ou NaN) est déjà faux, et sa
+    # cible sort du cône couvert par la fenêtre P, Q -> on tronque la trajectoire avant
+    lo = jnp.min(ics, axis=-1)[:, None, None] - EPS_MAXPRINCIPLE
+    hi = jnp.max(ics, axis=-1)[:, None, None] + EPS_MAXPRINCIPLE
+    ok = jnp.all((all_states >= lo) & (all_states <= hi), axis=-1)     # (ONPOLICY_TRAJ, MAX_STEPS+1), NaN -> False
+    ok = jnp.concatenate([ok, jnp.zeros((ok.shape[0], 1), bool)], axis=1)
+    n_valid = jnp.argmin(ok, axis=1)                                    # 1er état hors domaine, >= 1 (IC ok)
+
+    r = random.uniform(key_depth, (ONPOLICY_TRAJ, ONPOLICY_DEPTHS_PER_TRAJ))
+    depths = jnp.floor(r * n_valid[:, None]).astype(jnp.int32)          # dans [0, n_valid)
+    gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps+1,n),(k,) -> (k,n)
     u0s_corrupted = jax.lax.stop_gradient(gather_traj(all_states, depths))  # (ONPOLICY_TRAJ, k, n)
     u0s_corrupted = u0s_corrupted.reshape(-1, u0s_corrupted.shape[-1])      # (ONPOLICY_TRAJ*k, n)
 
@@ -93,16 +106,7 @@ def generate_onpolicy_pairs(key, params):
 
     u_finals_true = jax.vmap(relabel)(u0s_corrupted)
 
-    u_finals_ics_per_traj = jax.vmap(relabel)(ics)                                    # (ONPOLICY_TRAJ, n)
-    ics_flat          = jnp.repeat(ics, ONPOLICY_DEPTHS_PER_TRAJ, axis=0)              # (ONPOLICY_TRAJ*k, n)
-    u_finals_ics_flat = jnp.repeat(u_finals_ics_per_traj, ONPOLICY_DEPTHS_PER_TRAJ, axis=0)
-
-    is_bad = (jnp.any(~jnp.isfinite(u0s_corrupted), axis=-1)
-              | jnp.any(~jnp.isfinite(u_finals_true), axis=-1))
-    u0s_corrupted = jnp.where(is_bad[:, None], ics_flat, u0s_corrupted)
-    u_finals_true = jnp.where(is_bad[:, None], u_finals_ics_flat, u_finals_true)
-
-    return u0s_corrupted, u_finals_true, jnp.sum(is_bad)
+    return u0s_corrupted, u_finals_true, jnp.sum(n_valid <= ONPOLICY_MAX_STEPS)
 
 
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
@@ -248,9 +252,8 @@ for epoch in range(start_epoch, nb_epoch):
         key_train, key_onpolicy = random.split(key_train)
         u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy = generate_onpolicy_pairs(key_onpolicy, params)
         n_bad_onpolicy = int(n_bad_onpolicy)
-        if n_bad_onpolicy > 0:
-            print(f"  ⚠️  epoch {epoch} : {n_bad_onpolicy}/{u0s_onpolicy.shape[0]} paires on-policy "
-                  f"non-finies (modèle divergent), remplacées par IC propre.")
+        print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy sortent de "
+              f"[min u0, max u0] avant {ONPOLICY_MAX_STEPS} pas (tronquées avant la sortie).")
         u0s_epoch      = jnp.concatenate([u0s_training, u0s_onpolicy], axis=0)
         u_finals_epoch = jnp.concatenate([u_finals_training, u_finals_onpolicy], axis=0)
         N_epoch         = u0s_epoch.shape[0]
