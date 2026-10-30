@@ -329,8 +329,8 @@ for name in SNAPSHOT_FUNCTIONS:
 # MOVIE_TIME, un film par (fonction, résolution). Nécessite ffmpeg
 # (binaire système, ou `pip install imageio-ffmpeg`).
 # ------------------------------------------------------------------
-MAKE_MOVIES = False    # films désactivés ; True pour les générer
-MOVIE_TIME = 0         # temps physique final du film
+MAKE_MOVIES = True     # False pour désactiver les films
+MOVIE_TIME = T         # temps physique final du film (T de network_parameters)
 MOVIE_FPS = 20
 MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 MOVIE_RESOLUTIONS = [RESOLUTIONS[0]]   # films coûteux : par défaut la grille d'entraînement seule
