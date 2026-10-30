@@ -38,6 +38,7 @@ if "kernel" in params["params"]:
 # ------------------------------------------------------------------
 LAMBDA      = float(T_target * n)   # 25.6 à l'entraînement (n=256, T=0.1)
 RESOLUTIONS = [256]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
+PERF_RESOLUTIONS = [256, 512, 1024]   # perf modèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
 
 
 def make_grid(N):
@@ -420,9 +421,10 @@ if SOLVER != "advection":
         return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
 
     print("\n--- Perf : modèle (blocs CFL adaptatifs) vs solveur pas-à-pas ---")
-    for N in RESOLUTIONS:
+    for N in PERF_RESOLUTIONS:
+        perf_functions = test_functions.get(N) or make_test_functions(make_grid(N))
         for name in FUNCTION_NAMES:
-            u0 = test_functions[N][name]
+            u0 = perf_functions[name]
             for t_phys in PHYSICAL_TIMES:
                 (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
                 (u_solver, _, n_dt_steps), t_solver = _bench(burgers_rollout_cfl, u0, t_phys)
