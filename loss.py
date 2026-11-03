@@ -11,21 +11,17 @@ else:
 
 dx = x[1] - x[0]
 
-# F_{j+1/2} = F_God(WL_j, WR_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
-# fenêtre j constante -> WL_j = WR_j = wb_j -> F = f(wb_j), quels que soient les poids
-# (f(wb_j) seul est un schéma centré instable, cf. test_consistance.py ; Godunov prend le côté amont)
+# F_{j+1/2} = f(wb_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
+# fenêtre j constante -> w_j = w_bar_j -> F = f(wb_j), quels que soient les poids
 def predict_F(params, u0):
     S     = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
-    S_mid = S[P + 1:P + 1 + u0.shape[-1]]
-    WL    = (S_mid - S[:u0.shape[-1]]) / (P + 1)     # moyenne de u_{j-P} .. u_j     (gauche de j+1/2)
-    WR    = (S[P + Q + 1:] - S_mid) / Q              # moyenne de u_{j+1} .. u_{j+Q} (droite de j+1/2)
     wb    = (S[P + Q + 1:] - S[:u0.shape[-1]]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
     N     = model.apply(params, u0)                   # (n,) convolution sur u0
     N_bar = model.apply(params, wb, method=FNO1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
     if SOLVER == "advection":
         consistance = a * wb
     else:
-        consistance = 0.5 * jnp.maximum(jnp.maximum(WL, 0.0)**2, jnp.minimum(WR, 0.0)**2)   # Godunov
+        consistance = wb**2 / 2.0
     return consistance + N - N_bar
 
 
