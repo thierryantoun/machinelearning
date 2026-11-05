@@ -9,13 +9,12 @@ import optax
 import pickle
 import math
 from network_parameters import (
-    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target, a, P, Q,
+    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, LAMBDA, a, P, Q,
     ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
 )
 from initial_data import generate_initial_data, generate_initial_data_euler
-from stencil import stencil_size
 from euler_solver import primitives, gamma
-from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise
+from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -36,7 +35,7 @@ PARAMS_PATH     = f"params_{MODEL}_{SOLVER}.pkl"
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)
 
-# T_target joue le rôle de T * V : chaque bloc dure T = T_target / V_max(u),
+# lambda = T * V / dx est fixé : chaque bloc dure T = T_bloc(u),
 # calculé par état dans generate_trajectory ci-dessous.
 
 N_VAL_TRAJ = max(1, N_TRAJ // 5)
@@ -50,12 +49,12 @@ def wave_speeds(U, V):
     return jnp.min(u - c), jnp.max(u + c)
 
 def generate_trajectory(key):
-    "Trajectoire de MULTIPLE_STEPS blocs en vraies valeurs, chacun integre sur T = T_target / V_max(u)."
+    "Trajectoire de MULTIPLE_STEPS blocs en vraies valeurs, chacun integre sur T = T_bloc(u)."
     u0 = generate_initial_data_euler(key)
 
     def run_chunk(u, _):
         V = V_max(u)
-        T = T_target / V
+        T = T_bloc(u)
         u_next, _, _ = _solver(u, T)
         return u_next, (u, u_next, T, wave_speeds(u_next, V))
 
@@ -65,7 +64,7 @@ def generate_trajectory(key):
 
 def model_step(params, u):
     F = predict_F(params, u)
-    return u - (T_target / dx) * (F - jnp.roll(F, 1, axis=-1))
+    return u - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
 
 
 EPS_MAXPRINCIPLE = 0.05   # tolérance de dépassement de [min u0, max u0]
@@ -101,7 +100,7 @@ def generate_onpolicy_pairs(key, params):
     u0s_corrupted = u0s_corrupted.reshape(-1, u0s_corrupted.shape[-1])      # (ONPOLICY_TRAJ*k, n)
 
     def relabel(u):
-        u_true_next, _, _ = _solver(u, T_target)
+        u_true_next, _, _ = _solver(u, T_bloc(u))
         return u_true_next
 
     u_finals_true = jax.vmap(relabel)(u0s_corrupted)
@@ -114,7 +113,7 @@ key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
 u0s_traj, u_finals_traj, ts_traj, speeds_traj = jax.vmap(generate_trajectory)(random.split(key_traj_train, N_TRAJ))
 u0s_training      = u0s_traj.reshape(-1, 3, x.shape[0])
 u_finals_training = u_finals_traj.reshape(-1, 3, x.shape[0])
-ts_training       = ts_traj.reshape(-1)   # T_target / V, varie selon l'état, garde juste pour verification/log
+ts_training       = ts_traj.reshape(-1)   # T_bloc(u), varie selon l'état, garde juste pour verification/log
 
 u0s_traj_val, u_finals_traj_val, ts_traj_val, speeds_traj_val = jax.vmap(generate_trajectory)(random.split(key_traj_val, N_VAL_TRAJ))
 u0s_validation      = u0s_traj_val.reshape(-1, 3, x.shape[0])
@@ -124,19 +123,18 @@ ts_validation       = ts_traj_val.reshape(-1)
 
 a_min = float(jnp.minimum(jnp.min(speeds_traj[0]), jnp.min(speeds_traj_val[0])))
 a_max = float(jnp.maximum(jnp.max(speeds_traj[1]), jnp.max(speeds_traj_val[1])))
-lam  = float(T_target / dx)
-p, q = stencil_size(a_min, a_max, lam)
-print(f"Vitesses normalisées en fin de bloc : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={lam:.4f} "
-      f"-> stencil p={p} (gauche), q={q} (droite), {p + q + 1} points (réseau : P={P}, Q={Q})")
+marge = max(-a_min, a_max)
+print(f"Vitesses normalisées en fin de bloc : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={LAMBDA:g} "
+      f"-> MARGE={marge:.4f}, {math.ceil(marge * LAMBDA)} cellules de chaque côté (réseau : {Q})")
 
 assert u0s_training.shape[0] == N_TRAIN
 n_batches     = max(1, N_TRAIN // batch_size)
 n_batches_val = max(1, N_VAL // batch_size)
 
-# Diagnostic : la durée des blocs T = T_target / V varie selon l'état ; c'est T * V / dx qui est fixe.
+# Diagnostic : la durée des blocs T = T_bloc(u) varie selon l'état ; c'est T * V / dx qui est fixe.
 print(f"T_batch: min={ts_training.min():.6f}, max={ts_training.max():.6f}, mean={ts_training.mean():.6f}")
 print(f"dx = {dx:.6f}")
-print(f"T * V / dx (facteur d'amplification, fixe) : {T_target/dx:.2f}")
+print(f"T * V / dx (facteur d'amplification, fixe) : {LAMBDA:.2f}")
 
 # optimiseur
 schedule = optax.warmup_cosine_decay_schedule(

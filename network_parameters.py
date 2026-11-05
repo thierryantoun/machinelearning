@@ -1,12 +1,11 @@
 import argparse
+import math
 
 import jax.numpy as jnp
 
-from stencil import stencil_size
-
 _parser = argparse.ArgumentParser()
-_parser.add_argument("--model", choices=["fno", "lgno"], default="fno",
-                      help="Modèle �|  utiliser : fno ou lgno")
+_parser.add_argument("--model", choices=["stencil_conv1D", "lgno"], default="stencil_conv1D",
+                      help="Modèle �|  utiliser : stencil_conv1D ou lgno")
 _args, _ = _parser.parse_known_args()
 
 MODEL = _args.model
@@ -23,13 +22,14 @@ T          = 50     # temps physique final des rollouts à pas CFL adaptatif (te
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-T_target   = 0.1               # lambda = T_target * n = 25.6 à n=256
+LAMBDA     = 25.6              # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
 
-# Bornes des vitesses caractéristiques f'(u) = min u0, max u0 (cf. print de training.py)
-# -> taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la
-# sortie du réseau en dépendent. lambda=25.6, u0 in [-1, 1] -> P=25, Q=26 (52 cellules)
-A_MIN, A_MAX = -1.0, 1.0
-P, Q       = stencil_size(A_MIN, A_MAX, T_target * n)
+# Taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la sortie du
+# réseau en dépendent. V n'est exact qu'au début du bloc : MARGE couvre la vitesse atteinte
+# pendant le bloc (cf. print de training.py). lambda=25.6, MARGE=1 -> P=25, Q=26 (52 cellules)
+MARGE      = 1.0
+Q          = math.ceil(MARGE * LAMBDA)
+P          = Q - 1
 batch_size = min(64, N_TRAIN)   # borné pour les petits tests (N_TRAIN < 64)
 nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size

@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax import random
 from euler_solver import gamma
-from network_parameters import K, T_target, x
+from network_parameters import K, LAMBDA, x
 
 
 def make_sinus_u0(key):
@@ -19,7 +19,7 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe,
     # 5: marches (constante par morceaux, discontinue), 6: creneau (pulse rectangulaire, discontinu)
     # 7: riemann (une seule discontinuite, deux niveaux aleatoires)
-    # 8: sinus_hf (sinus haute frequence k > K, sans choc pendant un bloc T_target)
+    # 8: sinus_hf (sinus haute frequence k > K, sans choc pendant un bloc T = LAMBDA / N)
     # 9: champ_gaussien (champ aléatoire gaussien, longueur de corrélation variée)
     ic_type = random.randint(subkey, (), 0, 10)
 
@@ -36,10 +36,10 @@ def generate_initial_data(key, nb_frequences=K, x=x):
         return jnp.sum(a_k[:, None] * jnp.sin(2*jnp.pi*ks[:, None]*x[None, :] + phase_k[:, None]), axis=0)
 
     def make_sinus_hf(subkey):
-        "Sinus haute fréquence, sans choc pendant un bloc T_target."
+        "Sinus haute fréquence, sans choc pendant un bloc T = LAMBDA / N."
         k1, k2, k3 = random.split(subkey, 3)
         kc  = random.randint(k1, (), K + 1, x.shape[0] // 2)       # fréquence au-dessus de K
-        eps = random.uniform(k2, (), minval=0.3, maxval=0.9) / (2 * jnp.pi * kc * T_target)
+        eps = random.uniform(k2, (), minval=0.3, maxval=0.9) / (2 * jnp.pi * kc * LAMBDA / x.shape[0])
         phi = random.uniform(k3, (), minval=0.0, maxval=2 * jnp.pi)
         return eps * jnp.sin(2 * jnp.pi * kc * x + phi)
 
