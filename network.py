@@ -23,31 +23,31 @@ class FNO1D(nn.Module):
     q: int = Q   # points à droite
 
     def setup(self):
-        # lifting : conv de noyau p+q+1, 1 canal -> dv canaux
+        # lifting : conv de noyau p+q+1, 3 canaux (rho, rho*u, E) -> dv canaux
         self.lifting = nn.Conv(features=self.dv, kernel_size=(self.p + self.q + 1,), padding="VALID", use_bias=True)
         self.blocks = [
             FNOBlock(width=self.dv, activation=self.activation)
             for _ in range(self.n_blocks)
         ]
-        self.projection = nn.Dense(features=1, use_bias=True)
+        self.projection = nn.Dense(features=3, use_bias=True)
 
-    # couches ponctuelles après le lifting : (n, dv) -> (n,)
+    # couches ponctuelles après le lifting : (n, dv) -> (3, n)
     def _head(self, x):
         for block in self.blocks:
             x = block(x)
-        return self.projection(x)[..., 0]
+        return self.projection(x).T
 
-    # u : (n,) -> N, (n,) ; p cellules fantomes à gauche et q à droite pour la périodicité
-    def __call__(self, u):
-        u = jnp.pad(u, (self.p, self.q), mode="wrap")
-        return self._head(self.lifting(u[..., None]))
+    # U : (3, n) -> N, (3, n) ; p cellules fantomes à gauche et q à droite pour la périodicité
+    def __call__(self, U):
+        U = jnp.pad(U, ((0, 0), (self.p, self.q)), mode="wrap")
+        return self._head(self.lifting(U.T))   # U.T : (n+p+q, 3), canaux en dernier pour nn.Conv
 
-    # c : (n,) -> N évalué en j sur la fenêtre constante (c_j, ..., c_j), (n,)
-    # la conv d'une fenêtre constante vaut c_j * sum_k kernel[k] + bias
+    # c : (3, n) -> N évalué en j sur la fenêtre constante (c_j, ..., c_j), (3, n)
+    # la conv d'une fenêtre constante vaut c_j @ sum_k kernel[k] + bias
     def constant(self, c):
-        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 1, dv)
+        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 3, dv)
         bias   = self.lifting.variables["params"]["bias"]     # (dv,)
-        return self._head(c[:, None] * jnp.sum(kernel, axis=(0, 1)) + bias)
+        return self._head(c.T @ jnp.sum(kernel, axis=0) + bias)
 
 
 model = FNO1D(activation=nn.gelu, dv=64)

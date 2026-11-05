@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from jax import random
+from euler_solver import gamma
 from network_parameters import K, T_target, x
 
 
@@ -143,3 +144,22 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     u = jnp.where(skip_normalize, u, u / jnp.max(jnp.abs(u)))
 
     return u
+
+
+def generate_initial_data_euler(key):
+    """U0 : (3, n), variables conservatives (rho, rho*u, E). Une forme indépendante par variable
+    primitive ; l'exponentielle garantit rho > 0 et p > 0."""
+    RHO_REF = 1.0
+    P_REF   = 1.0
+    U_MAX   = 1.0
+
+    k_rho, k_u, k_p = random.split(key, 3)
+    # clip : make_constante n'est pas renormalisée et peut aller jusqu'à +-5
+    f_rho = jnp.clip(generate_initial_data(k_rho), -1.0, 1.0)
+    f_u   = jnp.clip(generate_initial_data(k_u), -1.0, 1.0)
+    f_p   = jnp.clip(generate_initial_data(k_p), -1.0, 1.0)
+
+    rho = RHO_REF * jnp.exp(f_rho)      # rho dans [RHO_REF / e, RHO_REF * e]
+    u   = U_MAX * f_u
+    p   = P_REF * jnp.exp(f_p)          # p dans [P_REF / e, P_REF * e]
+    return jnp.stack([rho, rho * u, p / (gamma - 1.0) + 0.5 * rho * u**2])

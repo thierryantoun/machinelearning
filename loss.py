@@ -6,23 +6,70 @@ from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_ph
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
-else:
+elif SOLVER == "burgers":
     from burgers_solver import burgers_solver as _solver
+else: 
+    from euler_solver import euler_solver as _solver, flux, primitives, gamma
 
 dx = x[1] - x[0]
 
-# F_{j+1/2} = f(wb_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
-# fenêtre j constante -> w_j = w_bar_j -> F = f(wb_j), quels que soient les poids
-def predict_F(params, u0):
-    S     = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
-    wb    = (S[P + Q + 1:] - S[:u0.shape[-1]]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
-    N     = model.apply(params, u0)                   # (n,) convolution sur u0
-    N_bar = model.apply(params, wb, method=FNO1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
+
+# V = max_j (|u_j| + c_j), un nombre par état, recalculé à chaque bloc
+def V_max(U):
+    rho, u, p = primitives(U)
+    return jnp.max(jnp.abs(u) + jnp.sqrt(gamma * p / rho))
+
+# (rho, m, E) -> (rho, m / V, E / V²) : u -> u / V, p -> p / V², et max(|u| + c) = 1 si V = V_max(U)
+def normalise(U, V):
+    return jnp.stack([U[0], U[1] / V, U[2] / V**2])
+
+def denormalise(U, V):
+    return jnp.stack([U[0], U[1] * V, U[2] * V**2])
+
+
+# F_{j+1/2} = flux(wb_L_j, wb_R_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
+# fenêtre j constante -> w_j = wb_L_j = wb_R_j = wb_j -> F = f(wb_j), quels que soient les poids
+def predict_F(params, U0):
+    nx    = U0.shape[-1]
+    S     = jnp.concatenate([jnp.zeros((3, 1)), jnp.cumsum(jnp.pad(U0, ((0, 0), (P, Q)), mode="wrap"), axis=-1)], axis=-1)  # (3, n+P+Q+1)
+    wb    = (S[:, P + Q + 1:] - S[:, :nx]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
+    wb_L  = (S[:, P + 1:nx + P + 1] - S[:, :nx]) / (P + 1)   # moyenne de U_{j-P} .. U_j, à gauche de la face j+1/2
+    wb_R  = (S[:, P + Q + 1:] - S[:, P + 1:nx + P + 1]) / Q  # moyenne de U_{j+1} .. U_{j+Q}, à droite de la face j+1/2
+    N     = model.apply(params, U0)                   # (3, n) convolution sur U0
+    N_bar = model.apply(params, wb, method=FNO1D.constant)  # (3, n) fenêtres constantes (wb_j, ..., wb_j)
     if SOLVER == "advection":
         consistance = a * wb
+    elif SOLVER == "burgers":
+        consistance = wb**2 / 2
     else:
-        consistance = wb**2 / 2.0
+        consistance = flux(wb_L, wb_R)
     return consistance + N - N_bar
+
+
+# un bloc du réseau sur les vraies valeurs : T_target joue le rôle de T * V, le bloc dure T_target / V
+def bloc(params, U):
+    V   = V_max(U)
+    U_t = normalise(U, V)
+    F_t = predict_F(params, U_t)
+    U_t = U_t - (T_target / dx) * (F_t - jnp.roll(F_t, 1, axis=-1))
+    return denormalise(U_t, V), T_target / V
+
+
+# blocs du réseau tant qu'on ne dépasse pas T_final ; le réseau est entraîné à lambda fixe,
+# donc on ne raccourcit pas le dernier bloc : le solveur fait le reste (moins d'un bloc)
+@jax.jit
+def rollout(params, U0, T_final):
+    def cond_fn(carry):
+        U, t = carry
+        return t + T_target / V_max(U) <= T_final
+
+    def body_fn(carry):
+        U, t = carry
+        U_new, T_k = bloc(params, U)
+        return (U_new, t + T_k)
+
+    U, t = jax.lax.while_loop(cond_fn, body_fn, (U0, 0.0))
+    return _solver(U, T_final - t)[0]
 
 
 Ktot  = n // 2 + 1
@@ -30,18 +77,23 @@ kappa     = 0.8
 k0        = int(kappa * Ktot)
 
 
+# u0s_batch, u_finals_batch : (batch, 3, n), vraies valeurs, u_final à T_target / V_max(u0) de u0
 def _loss_fno(params, u0s_batch, u_finals_batch):
+    Vs = jax.vmap(V_max)(u0s_batch)
+    u0s_batch      = jax.vmap(normalise)(u0s_batch, Vs)        # entrée et cible avec le même V, celui de l'entrée
+    u_finals_batch = jax.vmap(normalise)(u_finals_batch, Vs)
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
     u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
-    erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=1) + 1e-12)
-    norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
+    erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=-1) + 1e-12)  # (batch, 3)
+    # norme moyenne sur le batch, par variable : E ne domine pas rho, et rho*u peut être nul sur une trajectoire
+    norme  = jnp.mean(jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=-1) + 1e-12), axis=0, keepdims=True)  # (1, 3)
     loss_phys = jnp.mean(erreur / norme)
 
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
-    e_hf    = e_hat[:, k0:Ktot]
-    loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf), axis=-1))
+    e_hf    = e_hat[..., k0:Ktot]
+    loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf), axis=-1) / norme)
 
     loss = lambda_phys * loss_phys + lambda_hf * loss_hf
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
