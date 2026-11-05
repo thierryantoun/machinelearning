@@ -6,15 +6,11 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from network_parameters import SOLVER, T_target, n, cfl, T
-from loss import predict_F
+from network_parameters import MODEL, SOLVER, LAMBDA, n, cfl, T
+from loss import predict_F, V_max, normalise, bloc, rollout
+from euler_solver import euler_solver as _active_solver, flux, primitives, gamma
 
-if SOLVER == "advection":
-    from advection_solver import advection_solver as _active_solver
-else:
-    from burgers_solver import burgers_solver as _active_solver
-
-with open("params_fno.pkl", "rb") as f:
+with open(f"params_{MODEL}_{SOLVER}.pkl", "rb") as f:
     params = pickle.load(f)
 
 # Params entraînés avec l'ancienne version (noyau déclaré à la main : params/kernel, params/bias)
@@ -25,9 +21,9 @@ if "kernel" in params["params"]:
     params = {"params": p}
 
 # ------------------------------------------------------------------
-# Évaluation multi-résolution à lambda = T / dx fixé (doc §2, protocole
+# Évaluation multi-résolution à lambda = T * V / dx fixé (doc §2, protocole
 # étape 2) : le modèle est entraîné à n = N0, puis évalué SANS
-# réentraînement sur d'autres grilles avec T_N = LAMBDA / N.
+# réentraînement sur d'autres grilles avec T * V = LAMBDA / N.
 # Domaine périodique [0, 1) -> dx = 1 / N. Les mêmes P, Q (fenêtre en
 # cellules) servent sur toutes les grilles : le noyau de la conv (P+Q+1
 # poids) est le même quelle que soit N.
@@ -36,9 +32,8 @@ if "kernel" in params["params"]:
 # taille de u : les fonctions jit ci-dessous se recompilent une fois par
 # résolution, rien d'autre à changer.
 # ------------------------------------------------------------------
-LAMBDA      = float(T_target * n)   # 25.6 à l'entraînement (n=256, T=0.1)
 RESOLUTIONS = [256]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
-PERF_RESOLUTIONS = [256, 512, 1024]   # perf modèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
+PERF_RESOLUTIONS = [8192]   # perf modèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
 
 
 def make_grid(N):
@@ -46,66 +41,39 @@ def make_grid(N):
 
 
 def T_of(N):
-    "Pas de temps d'un bloc sur la grille N, à lambda fixé."
+    "T * V d'un bloc sur la grille N, à lambda fixé : le bloc dure T_of(N) / V_max(u)."
     return LAMBDA / N
 
 
-def n_steps_of(t_phys, N):
-    return max(1, round(t_phys / T_of(N)))
+def n_steps_of(t_phys, u0):
+    "Nombre de blocs estimé avec le V de u0 ; V change ensuite au fil des blocs."
+    return max(1, round(t_phys * float(V_max(u0)) / T_of(u0.shape[-1])))
 
 
 def solver(u):
-    "Un bloc du vrai schéma, sur le temps T_N de la grille de u."
-    return _active_solver(u, T_of(u.shape[-1]))
+    "Un bloc du vrai schéma, sur le temps T_of(N) / V_max(u) de la grille de u."
+    return _active_solver(u, T_of(u.shape[-1]) / V_max(u))
 
 
 def step(u):
-    "Un bloc du modèle : u - lambda (F_{j+1/2} - F_{j-1/2}), lambda = T_N / dx identique sur toute grille."
-    F = predict_F(params, u)
-    return u - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
+    "Un bloc du modèle sur les vraies valeurs : normalise, avance à lambda fixé, dénormalise."
+    return bloc(params, u)[0]
 
 
 def l2(v):
-    "Norme L2 physique sqrt(dx * sum v^2), dx = 1/N : comparable d'une grille à l'autre."
+    "Norme L2 physique sqrt(dx * sum v^2), dx = 1/N, par variable : comparable d'une grille à l'autre."
     return jnp.sqrt(jnp.sum(v ** 2, axis=-1) / v.shape[-1])
 
 
-@partial(jax.jit, static_argnames=("n_steps",))
-def solver_rollout(u0, n_steps):
-    def solver_block(u, _):
-        return solver(u)[0], None
-    u_target, _ = jax.lax.scan(solver_block, u0, None, length=n_steps)
-    return u_target
-
-
 @jax.jit
+def solver_rollout(u0, t_final):
+    "Le vrai schéma jusqu'au temps physique t_final."
+    return _active_solver(u0, t_final)[0]
+
+
 def model_rollout(u0, t_final=T):
-    """Rollout à pas CFL adaptatif jusqu'au temps physique t_final.
-
-    Invariance d'échelle de Burgers : v(x, t) = alpha u(x, alpha t). Pour tout
-    alpha >= max|u|, u / alpha a une vitesse max <= 1 (domaine d'entraînement) ;
-    un bloc du modèle sur u / alpha (lambda inchangé) fait avancer u de T_N / alpha.
-      - alpha = max|u|                  -> pas T_cfl = T_N / max|u| (cône = stencil)
-      - alpha = T_N / (t_final - t)     -> dernier pas raccourci pour tomber pile sur t_final
-    On prend le plus grand des deux : le pas ne dépasse jamais T_cfl ni t_final,
-    et max|u| -> 0 ne pose pas de problème (le pas est borné par le temps restant).
-
-    Renvoie (u(t_final), nombre de blocs).
-    """
-    T_N = T_of(u0.shape[-1])
-
-    def cond_fn(carry):
-        _, t, _ = carry
-        return t < t_final
-
-    def body_fn(carry):
-        u, t, n_blocks = carry
-        alpha = jnp.maximum(jnp.max(jnp.abs(u)), T_N / (t_final - t))
-        u_next = alpha * step(u / alpha)          # normalise, bloc du modèle, remise à l'échelle
-        return u_next, t + T_N / alpha, n_blocks + 1
-
-    u_pred, _, n_blocks = jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
-    return u_pred, n_blocks
+    "Blocs du modèle jusqu'à t_final (loss.rollout). Renvoie (U(t_final), nombre de blocs)."
+    return rollout(params, u0, t_final)
 
 
 @partial(jax.jit, static_argnames=("n_steps",))
@@ -113,35 +81,36 @@ def error_growth(u0, n_steps):
     """Croissance de l'erreur bloc par bloc.
 
     On avance en parallèle deux trajectoires depuis le même u0 :
-      - u_true  : le vrai schéma numérique (référence) ;
+      - u_true  : le vrai schéma numérique (référence), sur la durée T_k du bloc du modèle,
+        pour comparer les deux au même temps physique ;
       - u_model : le modèle.
     À chaque bloc on mesure la norme L2 physique de (u_model − u_true) et de u_true.
 
-    Renvoie (errs, norms_true), chacun de longueur n_steps.
+    Renvoie (errs, norms_true, ts) : (n_steps, 3), (n_steps, 3) et durées (n_steps,).
     """
     def block(carry, _):
         u_model, u_true = carry
-        u_true_next = solver(u_true)[0]
-        u_model_next = step(u_model)
-        errs = (l2(u_model_next - u_true_next), l2(u_true_next))
+        u_model_next, T_k = bloc(params, u_model)
+        u_true_next = _active_solver(u_true, T_k)[0]
+        errs = (l2(u_model_next - u_true_next), l2(u_true_next), T_k)
         return (u_model_next, u_true_next), errs
 
-    _, (errs, norms_true) = jax.lax.scan(block, (u0, u0), None, length=n_steps)
-    return errs, norms_true
+    _, (errs, norms_true, ts) = jax.lax.scan(block, (u0, u0), None, length=n_steps)
+    return errs, norms_true, ts
 
 
 @partial(jax.jit, static_argnames=("n_steps",))
 def trajectories(u0, n_steps):
     """Comme error_growth, mais renvoie les champs à chaque bloc :
-    (u_true, u_model), chacun de forme (n_steps + 1, N), u0 inclus."""
+    (u_true, u_model), chacun de forme (n_steps + 1, 3, N), u0 inclus, et les durées ts."""
     def block(carry, _):
         u_true, u_model = carry
-        u_true = solver(u_true)[0]
-        u_model = step(u_model)
-        return (u_true, u_model), (u_true, u_model)
+        u_model, T_k = bloc(params, u_model)
+        u_true = _active_solver(u_true, T_k)[0]
+        return (u_true, u_model), (u_true, u_model, T_k)
 
-    _, trajs = jax.lax.scan(block, (u0, u0), None, length=n_steps)
-    return tuple(jnp.concatenate([u0[None], tr], axis=0) for tr in trajs)
+    _, (tr_true, tr_model, ts) = jax.lax.scan(block, (u0, u0), None, length=n_steps)
+    return tuple(jnp.concatenate([u0[None], tr], axis=0) for tr in (tr_true, tr_model)), ts
 
 
 def _bench(fn, *args, warmup=2, repeat=5):
@@ -162,20 +131,31 @@ def _bench(fn, *args, warmup=2, repeat=5):
 # Fonctions initiales absentes du dataset d'entraînement, échantillonnées sur
 # chaque grille : c'est la même fonction physique u0(x) à toutes les résolutions
 # (cf. "Limite" du doc §2 : en cellules, elle paraît étirée quand N grandit).
+def euler_state(rho, u, p):
+    "(rho, u, p) -> variables conservatives (rho, m, E), (3, N)."
+    return jnp.stack([rho, rho * u, p / (gamma - 1.0) + 0.5 * rho * u**2])
+
+
 def make_test_functions(x):
-    u0_somme_sinus = (
-        1.0 * jnp.sin(2 * jnp.pi * 1 * x)
+    un = jnp.ones_like(x)
+    sinus    = jnp.sin(2 * jnp.pi * x)
+    triangle = 2 / jnp.pi * jnp.arcsin(sinus)
+    paquet   = jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x)
+    somme_sinus = (
+        1.0 * sinus
         + 0.5 * jnp.sin(2 * jnp.pi * 3 * x + 0.7)
         + 0.3 * jnp.sin(2 * jnp.pi * 7 * x + 2.1)
     )
+    somme_sinus = somme_sinus / jnp.max(jnp.abs(somme_sinus))
     return {
-        "triangle":     2 / jnp.pi * jnp.arcsin(jnp.sin(2 * jnp.pi * x)),
-        "carre":        jnp.sign(jnp.sin(2 * jnp.pi * x)),
-        "paquet_onde":  jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x),
-        "sinus_simple": jnp.sin(2 * jnp.pi * x),
-        "somme_sinus":  u0_somme_sinus / jnp.max(jnp.abs(u0_somme_sinus)),
-        # Riemann simple (formation de choc en Burgers)
-        "riemann":      jnp.where(x < 0.5, 1.0, -0.5),
+        "triangle":     euler_state(jnp.exp(0.5 * triangle), 0.5 * triangle, un),
+        # contact pur : saut de densité transporté à u constant, p constant
+        "carre":        euler_state(jnp.exp(0.5 * jnp.sign(sinus)), 0.5 * un, un),
+        "paquet_onde":  euler_state(1.0 + 0.5 * paquet, 0.0 * un, 1.0 + 0.5 * paquet),
+        "sinus_simple": euler_state(un, 0.5 * sinus, un),
+        "somme_sinus":  euler_state(jnp.exp(0.5 * somme_sinus), 0.5 * somme_sinus, jnp.exp(0.5 * somme_sinus)),
+        # Riemann type Sod (choc, contact, détente), densité dans la plage d'entraînement
+        "riemann":      euler_state(jnp.where(x < 0.5, 2.5, 0.3125), 0.0 * un, jnp.where(x < 0.5, 1.0, 0.1)),
     }
 
 
@@ -183,11 +163,11 @@ grids          = {N: make_grid(N) for N in RESOLUTIONS}
 test_functions = {N: make_test_functions(grids[N]) for N in RESOLUTIONS}
 FUNCTION_NAMES = list(test_functions[RESOLUTIONS[0]])
 
-# Temps physiques fixes : n_steps = round(t / T_N) dépend de la grille.
+# Temps physiques fixes : le nombre de blocs dépend de la grille et de l'état.
 PHYSICAL_TIMES = [T]   # T de network_parameters ; ex. [0.1, 1, T] pour plusieurs horizons
 
 print(f"lambda = {LAMBDA:g} fixé ; " + ", ".join(
-    f"N={N} : T={T_of(N):g}, {make_grid(N).shape[0]} points" for N in RESOLUTIONS))
+    f"N={N} : T*V={T_of(N):g}, {make_grid(N).shape[0]} points" for N in RESOLUTIONS))
 
 # ------------------------------------------------------------------
 # Erreur à UN pas, par résolution (protocole étape 2). Prédiction du doc :
@@ -195,8 +175,8 @@ print(f"lambda = {LAMBDA:g} fixé ; " + ", ".join(
 # x = 0.5. On affiche l'erreur relative L2 (comme la loss) et l'endroit de
 # l'erreur ponctuelle max.
 # ------------------------------------------------------------------
-print("\n--- Erreur à un pas (relative L2 | max |err| @ x) ---")
-print(f"{'traj':<14}" + "".join(f"{'N=' + str(N):>30}" for N in RESOLUTIONS))
+print("\n--- Erreur à un pas (relative L2 rho, m, E | max |err| @ x) ---")
+print(f"{'traj':<14}" + "".join(f"{'N=' + str(N):>50}" for N in RESOLUTIONS))
 for name in FUNCTION_NAMES:
     row = f"{name:<14}"
     for N in RESOLUTIONS:
@@ -204,9 +184,11 @@ for name in FUNCTION_NAMES:
         u_true = solver(u0)[0]
         u_pred = step(u0)
         err = u_pred - u_true
-        rel = float(l2(err) / (l2(u_true) + 1e-12))
-        j = int(jnp.argmax(jnp.abs(err)))
-        row += f"{rel:>12.2e} | {float(jnp.abs(err[j])):.2e} @ {float(grids[N][j]):.3f}"
+        rel = l2(err) / (l2(u_true) + 1e-12)
+        err_max = jnp.max(jnp.abs(err), axis=0)
+        j = int(jnp.argmax(err_max))
+        row += (f"{float(rel[0]):>10.2e} {float(rel[1]):>9.2e} {float(rel[2]):>9.2e}"
+                f" | {float(err_max[j]):.2e} @ {float(grids[N][j]):.3f}")
     print(row)
 
 # ------------------------------------------------------------------
@@ -227,14 +209,14 @@ print(f"{'traj':<14}{'N':>6}{'F':>12}{'pas modèle':>12}{'pas solveur':>13}")
 exact_ok = True
 for name in FUNCTION_NAMES:
     u0_ref = make_test_functions(make_grid(n))[name]
-    F_ref, u_model_ref, u_true_ref = predict_F(params, u0_ref), step(u0_ref), solver(u0_ref)[0]
+    F_ref, u_model_ref, u_true_ref = predict_F(params, normalise(u0_ref, V_max(u0_ref))), step(u0_ref), solver(u0_ref)[0]
     for N in RESOLUTIONS:
         if N == n or N % n != 0:
             continue
         m = N // n
         u0_m = jnp.tile(u0_ref, m)
         gaps = [float(jnp.max(jnp.abs(a - jnp.tile(b, m)))) for a, b in (
-            (predict_F(params, u0_m), F_ref),
+            (predict_F(params, normalise(u0_m, V_max(u0_m))), F_ref),
             (step(u0_m), u_model_ref),
             (solver(u0_m)[0], u_true_ref),
         )]
@@ -263,8 +245,8 @@ for name in CELL_FUNCTIONS:
     for N in RESOLUTIONS:
         u0 = test_functions[N][name]
         j0 = N // 2                                   # saut initial en x = 0.5
-        up = step(u0)[j0 + jj]
-        ut = solver(u0)[0][j0 + jj]
+        up = step(u0)[0, j0 + jj]                     # rho
+        ut = solver(u0)[0][0, j0 + jj]
         axes[0].plot(jj, up, "o-", ms=3, lw=1, label=f"modèle N={N}")
         if N == RESOLUTIONS[0]:
             axes[0].plot(jj, ut, "k--", lw=1.2, label=f"cible N={N}")
@@ -274,7 +256,7 @@ for name in CELL_FUNCTIONS:
             axes[1].plot(jj, ut - ref_true, "--", lw=1, label=f"cible N={N} − N={RESOLUTIONS[0]}")
             print(f"[{name}] N={N} : modèle {float(jnp.max(jnp.abs(up - ref_pred))):.2e}   "
                   f"cible {float(jnp.max(jnp.abs(ut - ref_true))):.2e}")
-    axes[0].set_title(f"« {name} » après 1 pas, en cellules (lambda={LAMBDA:g})")
+    axes[0].set_title(f"rho de « {name} » après 1 pas, en cellules (lambda={LAMBDA:g})")
     axes[1].set_title(f"écart à N={RESOLUTIONS[0]}, cellule par cellule")
     for ax in axes:
         ax.set_xlabel("cellules depuis le saut initial (x = 0.5)")
@@ -287,30 +269,35 @@ for name in CELL_FUNCTIONS:
     print(f"Figure sauvegardée : {out_path}")
 
 # ------------------------------------------------------------------
-# Snapshots : cible vs modèle après n_blocks blocs, un
-# panneau par résolution. Un bloc dure T_N = LAMBDA / N : n_blocks = 1 donne
-# N=256 à T=0.1, N=512 à T=0.05, N=1024 à T=0.025 (même lambda, même nombre
-# de pas -> c'est la comparaison directe de l'invariance du doc §2).
+# Snapshots : cible vs modèle au temps de n_blocks blocs estimé avec le V de u0,
+# une colonne par résolution, une ligne par variable (rho, u, p).
+# Un bloc dure T_of(N) / V : même lambda, même nombre de pas à toute résolution
+# -> c'est la comparaison directe de l'invariance du doc §2.
 # ------------------------------------------------------------------
 SNAPSHOT_BLOCKS = [10]   # nombres de blocs (ex: [1, 10, 100])
 SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 
 def make_snapshot(name, n_steps):
-    fig, axes = plt.subplots(1, len(RESOLUTIONS), figsize=(6 * len(RESOLUTIONS), 5),
-                             sharey=True, squeeze=False)
-    for ax, N in zip(axes[0], RESOLUTIONS):
+    fig, axes = plt.subplots(3, len(RESOLUTIONS), figsize=(6 * len(RESOLUTIONS), 10),
+                             sharex=True, squeeze=False)
+    for col, N in enumerate(RESOLUTIONS):
         x, u0 = grids[N], test_functions[N][name]
+        t_final = n_steps * T_of(N) / float(V_max(u0))
 
-        u_true = solver_rollout(u0, n_steps)
-        u_pred, _ = model_rollout(u0, n_steps * T_of(N))   # même temps physique que la cible
+        u_true = solver_rollout(u0, t_final)
+        u_pred, n_blocks = model_rollout(u0, t_final)   # même temps physique que la cible
 
-        ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
-        ax.plot(x, u_true, label='cible', linewidth=1.5)
-        ax.plot(x, u_pred, label='prédit', linewidth=1.5, linestyle=':')
-        ax.set_xlabel('x')
-        ax.grid(True, alpha=0.3)
-        ax.set_title(f"N={N}, T={T_of(N):g}, {n_steps} pas  (t={n_steps * T_of(N):g})")
+        for row, (label, v0, v_true, v_pred) in enumerate(zip(
+                ("rho", "u", "p"), primitives(u0), primitives(u_true), primitives(u_pred))):
+            ax = axes[row][col]
+            ax.plot(x, v0, label='état initial', linestyle='--', alpha=0.4, color='gray')
+            ax.plot(x, v_true, label='cible', linewidth=1.5)
+            ax.plot(x, v_pred, label='prédit', linewidth=1.5, linestyle=':')
+            ax.set_ylabel(label)
+            ax.grid(True, alpha=0.3)
+        axes[2][col].set_xlabel('x')
+        axes[0][col].set_title(f"N={N}, {int(n_blocks)} blocs  (t={t_final:g})")
     axes[0][0].legend(loc='upper right')
     fig.suptitle(f"« {name} »  —  lambda={LAMBDA:g}")
     fig.tight_layout()
@@ -329,7 +316,7 @@ for name in SNAPSHOT_FUNCTIONS:
 # MOVIE_TIME, un film par (fonction, résolution). Nécessite ffmpeg
 # (binaire système, ou `pip install imageio-ffmpeg`).
 # ------------------------------------------------------------------
-MAKE_MOVIES = True     # False pour désactiver les films
+MAKE_MOVIES = False     # False pour désactiver les films
 MOVIE_TIME = T         # temps physique final du film (T de network_parameters)
 MOVIE_FPS = 20
 MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
@@ -352,12 +339,13 @@ def make_movie(name, N, t_final):
     from matplotlib.animation import FuncAnimation
 
     x, u0 = grids[N], test_functions[N][name]
-    T_N = T_of(N)
-    n_steps = n_steps_of(t_final, N)
-    u_true, u_pred = map(np.asarray, trajectories(u0, n_steps))
+    n_steps = n_steps_of(t_final, u0)
+    (u_true, u_pred), ts = trajectories(u0, n_steps)
+    u_true, u_pred = np.asarray(u_true[:, 0]), np.asarray(u_pred[:, 0])   # rho, (n_steps + 1, N)
+    t_k = np.concatenate([[0.0], np.cumsum(np.asarray(ts))])
 
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
+    ax.plot(x, u0[0], label='rho initial', linestyle='--', alpha=0.4, color='gray')
     line_true, = ax.plot(x, u_true[0], label='cible', linewidth=1.5)
     line_pred, = ax.plot(x, u_pred[0], label='prédit', linewidth=1.5, linestyle=':')
     # Échelle verticale fixée sur la cible (le modèle pur peut diverger).
@@ -373,7 +361,7 @@ def make_movie(name, N, t_final):
     def update(k):
         line_true.set_ydata(u_true[k])
         line_pred.set_ydata(u_pred[k])
-        title.set_text(f"« {name} »  —  N={N}  t={k * T_N:.2f}  (T={T_N:g})")
+        title.set_text(f"« {name} »  —  N={N}  t={t_k[k]:.3f}  (T*V={T_of(N):g})")
         return [line_true, line_pred, title]
 
     anim = FuncAnimation(fig, update, frames=n_steps + 1, blit=False)
@@ -388,7 +376,7 @@ if MAKE_MOVIES:
         for name in MOVIE_FUNCTIONS:
             make_movie(name, N, MOVIE_TIME)
 
-    # Films supplémentaires aux grilles fines (T_N = 0.05 à N=512, 0.025 à N=1024).
+    # Films supplémentaires aux grilles fines (T*V = 0.05 à N=512, 0.025 à N=1024).
     EXTRA_MOVIE_FUNCTIONS = ["riemann", "carre"]
     EXTRA_MOVIE_RESOLUTIONS = [N for N in (512, 1024) if N in RESOLUTIONS]   # vide si on reste à 256
     for N in EXTRA_MOVIE_RESOLUTIONS:
@@ -396,18 +384,16 @@ if MAKE_MOVIES:
             make_movie(name, N, MOVIE_TIME)
 
 if SOLVER != "advection":
-    from burgers_solver import flux as _burgers_flux
-
-    def burgers_step_cfl(u):
-        "Un pas Godunov, dt = cfl*dx/max|u|, jamais clampé sur T."
-        dx = 1.0 / u.shape[-1]
-        dt = cfl * dx / (jnp.max(jnp.abs(u)) + 1e-10)
-        f_face = _burgers_flux(u, jnp.roll(u, -1))
-        u_new = u - dt / dx * (f_face - jnp.roll(f_face, 1))
-        return u_new, dt
+    def euler_step_cfl(U):
+        "Un pas du schéma, dt = cfl*dx/V, jamais clampé sur T."
+        dx = 1.0 / U.shape[-1]
+        dt = cfl * dx / V_max(U)
+        f_face = flux(U, jnp.roll(U, -1, axis=-1))
+        U_new = U - dt / dx * (f_face - jnp.roll(f_face, 1, axis=-1))
+        return U_new, dt
 
     @jax.jit
-    def burgers_rollout_cfl(u0, t_final):
+    def euler_rollout_cfl(u0, t_final):
         "Solveur pas-à-pas classique : avance en pas dt naturels jusqu'à t_final."
         def cond_fn(carry):
             u, t, n_dt = carry
@@ -415,7 +401,7 @@ if SOLVER != "advection":
 
         def body_fn(carry):
             u, t, n_dt = carry
-            u_new, dt = burgers_step_cfl(u)
+            u_new, dt = euler_step_cfl(u)
             return (u_new, t + dt, n_dt + 1)
 
         return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
@@ -427,14 +413,13 @@ if SOLVER != "advection":
             u0 = perf_functions[name]
             for t_phys in PHYSICAL_TIMES:
                 (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
-                (u_solver, _, n_dt_steps), t_solver = _bench(burgers_rollout_cfl, u0, t_phys)
+                (u_solver, _, n_dt_steps), t_solver = _bench(euler_rollout_cfl, u0, t_phys)
 
-                mse = float(jnp.mean((u_model - u_solver) ** 2))
-                mse_norm = mse / (float(jnp.mean(u_solver ** 2)) + 1e-12)
+                rel = l2(u_model - u_solver) / (l2(u_solver) + 1e-12)
                 speedup = t_solver / t_model if t_model > 0 else float('nan')
                 print(f"[N={N}] [{name}] t={t_phys:g}  modèle={int(n_steps_model)} blocs ({t_model*1e3:.2f}ms)  "
-                      f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  MSE={mse:.6f}  "
-                      f"MSE_norm={mse_norm:.6f}  (×{speedup:.1f})")
+                      f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  "
+                      f"err. rel. rho={float(rel[0]):.2e} m={float(rel[1]):.2e} E={float(rel[2]):.2e}  (×{speedup:.1f})")
 
 # ------------------------------------------------------------------
 # Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
@@ -444,7 +429,7 @@ if SOLVER != "advection":
 # Les bandes sont en nombre d'onde PHYSIQUE k (le même sur toutes les
 # grilles) : low k∈[1,5], mid k∈[6,15], hi1 k∈[16,31], hi2 k∈[32,47],
 # hi3 k∈[48,63], hi4 k∈[64,95], hi5 k∈[96,128]. Au-delà de k=128 (modes
-# qui n'existent qu'à N>256) : bande "fine", k∈[129, N/2].
+# qui n'existent qu'à N>256) : bande "fine", k∈[129, N/2]. Calculé sur rho.
 # ε_B est un rapport, donc insensible à la normalisation de la rfft (∝ N²).
 # ------------------------------------------------------------------
 FREQ_BANDS = {
@@ -475,19 +460,18 @@ def print_band_table(title):
         for name in FUNCTION_NAMES:
             u0 = test_functions[N][name]
             for t_phys in PHYSICAL_TIMES:
-                n_steps = n_steps_of(t_phys, N)
-                u_true = solver_rollout(u0, n_steps)
-                u_pred, _ = model_rollout(u0, n_steps * T_of(N))   # même temps physique que la cible
-                errs = band_error(u_pred, u_true)
-                print(f"{N:>6}{name:>14}{t_phys:>8g}{n_steps:>9}"
+                u_true = solver_rollout(u0, t_phys)
+                u_pred, n_steps = model_rollout(u0, t_phys)   # même temps physique que la cible
+                errs = band_error(u_pred[0], u_true[0])
+                print(f"{N:>6}{name:>14}{t_phys:>8g}{int(n_steps):>9}"
                       + "".join(f"{float(errs[b]):>11.2e}" for b in FREQ_BANDS))
 
 
 print_band_table("Erreur par bande de fréquence")
 
 # ------------------------------------------------------------------
-# Croissance de l'erreur ‖û_n − u_n(vrai)‖_L2 en fonction du temps physique
-# t_n = n · T_N : un panneau par fonction test, une courbe par résolution.
+# Croissance de l'erreur ‖rho_n − rho_n(vrai)‖_L2 en fonction du temps physique
+# t_n = somme des T_k : un panneau par fonction test, une courbe par résolution.
 # Si l'invariance tient, les courbes se superposent (à nombre de pas
 # double/quadruple près pour atteindre le même t, cf. doc §8).
 # ------------------------------------------------------------------
@@ -500,15 +484,17 @@ n_rows = -(-len(FUNCTION_NAMES) // n_cols)
 fig_err, axes_err = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
 for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
     for N in RESOLUTIONS:
-        n_steps_err = n_steps_of(error_growth_time, N)
-        t_n = jnp.arange(1, n_steps_err + 1) * T_of(N)
-        errs_pur, _ = error_growth(test_functions[N][name], n_steps_err)
+        u0 = test_functions[N][name]
+        n_steps_err = n_steps_of(error_growth_time, u0)
+        errs_pur, _, ts = error_growth(u0, n_steps_err)
+        errs_pur = errs_pur[:, 0]                  # rho
+        t_n = jnp.cumsum(ts)
         ax.plot(t_n, errs_pur, linewidth=1.5, label=f"N={N}")
-        print(f"[{name}] N={N} ‖ε‖_L2 : t={T_of(N):g} → {float(errs_pur[0]):.3e}   "
+        print(f"[{name}] N={N} ‖ε‖_L2 : t={float(t_n[0]):g} → {float(errs_pur[0]):.3e}   "
               f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")
     ax.set_title(name)
-    ax.set_xlabel("t_n = n · T_N")
-    ax.set_ylabel("‖û_n − u_n(vrai)‖_L2")
+    ax.set_xlabel("t_n = somme des T_k")
+    ax.set_ylabel("‖rho_n − rho_n(vrai)‖_L2")
     ax.set_yscale("log")
     ax.grid(True, alpha=0.3, which="both")
     ax.legend()
