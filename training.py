@@ -14,7 +14,7 @@ from network_parameters import (
 )
 from initial_data import generate_initial_data, generate_initial_data_euler
 from euler_solver import primitives, gamma
-from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc
+from loss import model, loss_fn, make_train_step, predict_F, V_max, T_bloc
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -42,11 +42,11 @@ N_VAL_TRAJ = max(1, N_TRAJ // 5)
 N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
 
 # calcul stencil max sur tout le jeu de données pour savoir quelles valeurs prendre pour p et q
-# vitesses normalisées par le V du début du bloc : dans [-1, 1] au début, peuvent dépasser à la fin
+# vitesses rapportées au V du début du bloc : dans [-1, 1] au début, peuvent dépasser à la fin
 def wave_speeds(U, V):
-    rho, u, p = primitives(normalise(U, V))
+    rho, u, p = primitives(U)
     c = jnp.sqrt(gamma * p / rho)
-    return jnp.min(u - c), jnp.max(u + c)
+    return jnp.min(u - c) / V, jnp.max(u + c) / V
 
 def generate_trajectory(key):
     "Trajectoire de MULTIPLE_STEPS blocs en vraies valeurs, chacun integre sur T = T_bloc(u)."
@@ -64,7 +64,7 @@ def generate_trajectory(key):
 
 def model_step(params, u):
     F = predict_F(params, u)
-    return u - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
+    return u - LAMBDA / V_max(u) * (F - jnp.roll(F, 1, axis=-1))
 
 
 EPS_MAXPRINCIPLE = 0.05   # tolérance de dépassement de [min u0, max u0]
@@ -124,7 +124,7 @@ ts_validation       = ts_traj_val.reshape(-1)
 a_min = float(jnp.minimum(jnp.min(speeds_traj[0]), jnp.min(speeds_traj_val[0])))
 a_max = float(jnp.maximum(jnp.max(speeds_traj[1]), jnp.max(speeds_traj_val[1])))
 marge = max(-a_min, a_max)
-print(f"Vitesses normalisées en fin de bloc : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={LAMBDA:g} "
+print(f"Vitesses / V en fin de bloc : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={LAMBDA:g} "
       f"-> MARGE={marge:.4f}, {math.ceil(marge * LAMBDA)} cellules de chaque côté (réseau : {Q})")
 
 assert u0s_training.shape[0] == N_TRAIN

@@ -17,13 +17,6 @@ def V_max(U):
     rho, u, p = primitives(U)
     return jnp.max(jnp.abs(u) + jnp.sqrt(gamma * p / rho))
 
-# (rho, m, E) -> (rho, m / V, E / V²) : u -> u / V, p -> p / V², et max(|u| + c) = 1 si V = V_max(U)
-def normalise(U, V):
-    return jnp.stack([U[0], U[1] / V, U[2] / V**2])
-
-def denormalise(U, V):
-    return jnp.stack([U[0], U[1] * V, U[2] * V**2])
-
 
 # F_{j+1/2} = flux(wb_L_j, wb_R_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
 # fenêtre j constante -> w_j = wb_L_j = wb_R_j = wb_j -> F = f(wb_j), quels que soient les poids
@@ -49,13 +42,10 @@ def T_bloc(U):
     return LAMBDA / U.shape[-1] / V_max(U)
 
 
-# un bloc du réseau sur les vraies valeurs
+# un bloc du réseau : T / dx = LAMBDA / V
 def bloc(params, U):
-    V   = V_max(U)
-    U_t = normalise(U, V)
-    F_t = predict_F(params, U_t)
-    U_t = U_t - LAMBDA * (F_t - jnp.roll(F_t, 1, axis=-1))
-    return denormalise(U_t, V), T_bloc(U)
+    F = predict_F(params, U)
+    return U - LAMBDA / V_max(U) * (F - jnp.roll(F, 1, axis=-1)), T_bloc(U)
 
 
 # blocs du réseau tant qu'on ne dépasse pas T_final ; le réseau est entraîné à lambda fixe,
@@ -83,11 +73,9 @@ k0        = int(kappa * Ktot)
 
 # u0s_batch, u_finals_batch : (batch, 3, n), vraies valeurs, u_final à T_bloc(u0) de u0
 def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
-    Vs = jax.vmap(V_max)(u0s_batch)
-    u0s_batch      = jax.vmap(normalise)(u0s_batch, Vs)        # entrée et cible avec le même V, celui de l'entrée
-    u_finals_batch = jax.vmap(normalise)(u_finals_batch, Vs)
+    Vs = jax.vmap(V_max)(u0s_batch)[:, None, None]             # (batch, 1, 1)
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    u_pred = u0s_batch - LAMBDA * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    u_pred = u0s_batch - LAMBDA / Vs * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
     erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=-1) + 1e-12)  # (batch, 3)
