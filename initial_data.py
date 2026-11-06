@@ -152,12 +152,21 @@ def generate_initial_data_euler(key):
     RHO_REF = 1.0
     P_REF   = 1.0
     U_MAX   = 1.0
+    P_RIEMANN = 0.25          # part des tirages avec un saut de rho, u et p au même endroit
 
-    k_rho, k_u, k_p = random.split(key, 3)
+    k_rho, k_u, k_p, k_mode, k_split, k_L, k_R = random.split(key, 7)
     # clip : make_constante n'est pas renormalisée et peut aller jusqu'à +-5
     f_rho = jnp.clip(generate_initial_data(k_rho), -1.0, 1.0)
     f_u   = jnp.clip(generate_initial_data(k_u), -1.0, 1.0)
     f_p   = jnp.clip(generate_initial_data(k_p), -1.0, 1.0)
+
+    # Riemann commun : une seule position de saut, états gauche et droit indépendants
+    # (par périodicité, un second saut en x = 0)
+    split     = random.uniform(k_split, (), minval=0.0, maxval=1.0)
+    f_L       = random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
+    f_R       = random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
+    f_riemann = jnp.where(x < split, f_L, f_R)                          # (3, n)
+    f_rho, f_u, f_p = jnp.where(random.bernoulli(k_mode, P_RIEMANN), f_riemann, jnp.stack([f_rho, f_u, f_p]))
 
     rho = RHO_REF * jnp.exp(f_rho)      # rho dans [RHO_REF / e, RHO_REF * e]
     u   = U_MAX * f_u

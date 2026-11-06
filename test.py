@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from network_parameters import MODEL, SOLVER, LAMBDA, n, cfl, T
-from loss import predict_F, V_max, bloc, rollout
+from loss import predict_F, V_max, normalise, bloc, rollout
 from euler_solver import euler_solver as _active_solver, flux, primitives, gamma
 
 with open(f"params_{MODEL}_{SOLVER}.pkl", "rb") as f:
@@ -56,7 +56,7 @@ def solver(u):
 
 
 def step(u):
-    "Un bloc du modèle, à lambda = T * V / dx fixé."
+    "Un bloc du modèle sur les vraies valeurs : normalise, avance à lambda fixé, dénormalise."
     return bloc(params, u)[0]
 
 
@@ -209,14 +209,14 @@ print(f"{'traj':<14}{'N':>6}{'F':>12}{'pas modèle':>12}{'pas solveur':>13}")
 exact_ok = True
 for name in FUNCTION_NAMES:
     u0_ref = make_test_functions(make_grid(n))[name]
-    F_ref, u_model_ref, u_true_ref = predict_F(params, u0_ref), step(u0_ref), solver(u0_ref)[0]
+    F_ref, u_model_ref, u_true_ref = predict_F(params, normalise(u0_ref, V_max(u0_ref))), step(u0_ref), solver(u0_ref)[0]
     for N in RESOLUTIONS:
         if N == n or N % n != 0:
             continue
         m = N // n
         u0_m = jnp.tile(u0_ref, m)
         gaps = [float(jnp.max(jnp.abs(a - jnp.tile(b, m)))) for a, b in (
-            (predict_F(params, u0_m), F_ref),
+            (predict_F(params, normalise(u0_m, V_max(u0_m))), F_ref),
             (step(u0_m), u_model_ref),
             (solver(u0_m)[0], u_true_ref),
         )]
