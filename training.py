@@ -102,7 +102,18 @@ def generate_onpolicy_pairs(key, params):
 
     u_finals_true = jax.vmap(relabel)(u0s_corrupted)
 
-    return u0s_corrupted, u_finals_true, jnp.sum(n_valid <= ONPOLICY_MAX_STEPS), jnp.mean(n_valid)
+    # diagnostic : dernier état admissible de chaque trajectoire. Pour celles qui ratent, c'est
+    # l'état dont le pas suivant du réseau n'est plus admissible ; pour les saines, l'état final
+    fail = n_valid <= ONPOLICY_MAX_STEPS
+    last_states = jax.lax.stop_gradient(all_states[jnp.arange(ONPOLICY_TRAJ), n_valid - 1])  # (ONPOLICY_TRAJ, 3, n)
+
+    return u0s_corrupted, u_finals_true, jnp.sum(fail), jnp.mean(n_valid), last_states, fail
+
+
+@jax.jit
+def relabel_batch(us):
+    "Cibles du vrai solveur sur T_bloc(u) pour un lot d'états (N, 3, n)."
+    return jax.vmap(lambda u: _solver(u, T_bloc(u))[0])(us)
 
 
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
@@ -243,7 +254,8 @@ u0s_onpolicy = None   # dernières paires on-policy générées, pour le diagnos
 for epoch in range(start_epoch, nb_epoch):
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
-        u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy, n_valid_mean = generate_onpolicy_pairs(key_onpolicy, params)
+        (u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy, n_valid_mean,
+         last_states_onpolicy, fail_onpolicy) = generate_onpolicy_pairs(key_onpolicy, params)
         n_bad_onpolicy = int(n_bad_onpolicy)
         print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy deviennent "
               f"non admissibles (rho<=0, p<=0 ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant), "
@@ -286,6 +298,16 @@ for epoch in range(start_epoch, nb_epoch):
             metrics_onpolicy = eval_losses(params, u0s_onpolicy, u_finals_onpolicy, n_batches_onpolicy)
             detail_onpolicy = " ".join(f"{k}={v:.6f}" for k, v in metrics_onpolicy.items() if k != "loss")
             print(f"           OnPolicy: {metrics_onpolicy['loss']:.6f} ({detail_onpolicy})")
+
+            # loss sur le dernier état admissible : trajectoires qui ratent vs trajectoires saines
+            targets_last = relabel_batch(last_states_onpolicy)
+            for nom, mask in (("ratées", fail_onpolicy), ("saines", ~fail_onpolicy)):
+                n_mask = int(jnp.sum(mask))
+                if n_mask == 0:
+                    continue
+                m = eval_losses(params, last_states_onpolicy[mask], targets_last[mask], max(1, n_mask // batch_size))
+                detail = " ".join(f"{k}={v:.6f}" for k, v in m.items() if k != "loss")
+                print(f"           Dernier état valide, {nom} ({n_mask}) : {m['loss']:.6f} ({detail})")
         losses_training.append(float(loss_train))
         losses_validation.append(float(loss_val))
 
