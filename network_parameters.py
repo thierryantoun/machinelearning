@@ -36,6 +36,8 @@ n_batches  = N_TRAIN // batch_size
 
 lambda_hf   = 1.0
 lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
+lambda_pos  = 0.1   # poids de loss_pos (positivité de rho et p prédits) ; 0 pour la désactiver
+EPS_POS     = 0.5   # marge : pénalise les cellules où rho_pred < EPS_POS * rho_cible (idem p)
 
 # ------------------------------------------------------------------
 # Entraînement "model-in-the-loop" (correction de l'exposure bias) :

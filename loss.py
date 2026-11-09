@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model, stencil_conv1D
-from network_parameters import a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, LAMBDA, P, Q
+from network_parameters import a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, lambda_pos, EPS_POS, LAMBDA, P, Q
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -81,6 +81,20 @@ kappa     = 0.8
 k0        = int(kappa * Ktot)
 
 
+# Positivité : terme à seuil, nul tant que rho_pred >= EPS_POS * rho_cible et q_pred >= EPS_POS * q_cible,
+# avec q = rho * E - m^2 / 2 = rho * p / (gamma - 1) : si rho > 0, p > 0 <=> q > 0, et q est polynomial
+# (pas de division par un rho_pred proche de 0, gradient borné). Divisé par la moyenne de la cible ;
+# somme sur les cellules pour qu'une seule cellule fautive pèse. Invariant par la normalisation par V.
+def loss_positivite(u_pred, u_cible):  # (batch, 3, n) chacun
+    def rho_q(U):
+        return U[:, 0], U[:, 0] * U[:, 2] - 0.5 * U[:, 1]**2
+    rho_pred, q_pred = rho_q(u_pred)
+    rho_cib,  q_cib  = rho_q(u_cible)
+    viol_rho = jax.nn.relu(EPS_POS * rho_cib - rho_pred) / jnp.mean(rho_cib, axis=-1, keepdims=True)
+    viol_q   = jax.nn.relu(EPS_POS * q_cib - q_pred)     / jnp.mean(q_cib, axis=-1, keepdims=True)
+    return jnp.mean(jnp.sum(viol_rho + viol_q, axis=-1))
+
+
 # u0s_batch, u_finals_batch : (batch, 3, n), vraies valeurs, u_final à T_bloc(u0) de u0
 def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
     Vs = jax.vmap(V_max)(u0s_batch)
@@ -99,8 +113,10 @@ def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
     e_hf    = e_hat[..., k0:Ktot]
     loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf), axis=-1) / norme)
 
-    loss = lambda_phys * loss_phys + lambda_hf * loss_hf
-    return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
+    loss_pos = loss_positivite(u_pred, u_finals_batch)
+
+    loss = lambda_phys * loss_phys + lambda_hf * loss_hf + lambda_pos * loss_pos
+    return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf, "loss_pos": loss_pos}
 
 loss_fn = jax.jit(_loss_stencil_conv1D)
 
