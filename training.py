@@ -12,7 +12,7 @@ from network_parameters import (
     MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, LAMBDA, a, P, Q,
     ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
 )
-from initial_data import generate_initial_data, generate_initial_data_euler
+from initial_data import generate_initial_data, generate_initial_data_euler, ic_types_euler
 from euler_solver import primitives, gamma
 from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc, bloc
 
@@ -72,7 +72,9 @@ def admissible(U):
 def generate_onpolicy_pairs(key, params):
 
     key_ic, key_depth = random.split(key)
-    ics = jax.vmap(generate_initial_data_euler)(random.split(key_ic, ONPOLICY_TRAJ))  # (ONPOLICY_TRAJ, 3, n)
+    keys_ic = random.split(key_ic, ONPOLICY_TRAJ)
+    ics = jax.vmap(generate_initial_data_euler)(keys_ic)  # (ONPOLICY_TRAJ, 3, n)
+    ic_riemann, ic_types = jax.vmap(ic_types_euler)(keys_ic)  # (ONPOLICY_TRAJ,), (ONPOLICY_TRAJ, 3)
 
     def rollout_model(u0):
         def body(u, _):
@@ -107,7 +109,8 @@ def generate_onpolicy_pairs(key, params):
     fail = n_valid <= ONPOLICY_MAX_STEPS
     last_states = jax.lax.stop_gradient(all_states[jnp.arange(ONPOLICY_TRAJ), n_valid - 1])  # (ONPOLICY_TRAJ, 3, n)
 
-    return u0s_corrupted, u_finals_true, jnp.sum(fail), jnp.mean(n_valid), last_states, fail
+    ic_info = {"riemann": ic_riemann, "types": ic_types, "n_valid": n_valid}
+    return u0s_corrupted, u_finals_true, jnp.sum(fail), jnp.mean(n_valid), last_states, fail, ic_info
 
 
 @jax.jit
@@ -192,6 +195,28 @@ def run_epoch(params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoc
 
 PATIENCE = 50
 
+IC_NOMS = ["sinus", "gaussiennes", "polynomes", "constante", "rampe",
+           "marches", "creneau", "riemann", "sinus_hf", "champ_gaussien"]
+
+
+def print_echecs_par_type(fail, info):
+    """Taux d'échec on-policy par catégorie de CI. Hors Riemann commun, une trajectoire compte
+    dans le type t si au moins une des variables (rho, u, p) est de type t."""
+    riemann, types, n_valid = info["riemann"], info["types"], info["n_valid"]
+    taux_global = float(jnp.mean(fail))
+    print(f"           Échecs par type de CI (taux global {100 * taux_global:.1f} %, "
+          f"dont {int(jnp.sum(fail & (n_valid == 1)))} dès le 1er pas) :")
+    categories = [("Riemann commun", riemann)] + [
+        (nom, ~riemann & jnp.any(types == t, axis=1)) for t, nom in enumerate(IC_NOMS)]
+    for nom, mask in categories:
+        n_cat = int(jnp.sum(mask))
+        if n_cat == 0:
+            continue
+        n_fail = int(jnp.sum(fail & mask))
+        n_fail_1 = int(jnp.sum(fail & mask & (n_valid == 1)))
+        print(f"             {nom:15s} : {n_fail:5d}/{n_cat:5d} = {100 * n_fail / n_cat:5.1f} %"
+              f"  (1er pas : {n_fail_1})")
+
 
 def eval_losses(params, u0s, u_finals, n_batches_eval):
     "Moyenne des métriques de loss_fn (dict aux) sur n_batches_eval batches."
@@ -255,7 +280,7 @@ for epoch in range(start_epoch, nb_epoch):
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
         (u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy, n_valid_mean,
-         last_states_onpolicy, fail_onpolicy) = generate_onpolicy_pairs(key_onpolicy, params)
+         last_states_onpolicy, fail_onpolicy, ic_info_onpolicy) = generate_onpolicy_pairs(key_onpolicy, params)
         n_bad_onpolicy = int(n_bad_onpolicy)
         print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy deviennent "
               f"non admissibles (rho<=0, p<=0 ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant), "
@@ -308,6 +333,8 @@ for epoch in range(start_epoch, nb_epoch):
                 m = eval_losses(params, last_states_onpolicy[mask], targets_last[mask], max(1, n_mask // batch_size))
                 detail = " ".join(f"{k}={v:.6f}" for k, v in m.items() if k != "loss")
                 print(f"           Dernier état valide, {nom} ({n_mask}) : {m['loss']:.6f} ({detail})")
+
+            print_echecs_par_type(fail_onpolicy, ic_info_onpolicy)
         losses_training.append(float(loss_train))
         losses_validation.append(float(loss_val))
 

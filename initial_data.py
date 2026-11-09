@@ -146,13 +146,29 @@ def generate_initial_data(key, nb_frequences=K, x=x):
     return u
 
 
+P_RIEMANN = 0.25          # part des tirages Euler avec un saut de rho, u et p au même endroit
+
+
+# Diagnostic : retrouve le type d'une CI à partir de sa clé, sans la regénérer.
+# DOIT reproduire les random.split de generate_initial_data / generate_initial_data_euler.
+def ic_type_scalar(key):
+    "Type (0..9) tiré par generate_initial_data(key)."
+    return random.randint(random.split(key)[1], (), 0, 10)
+
+
+def ic_types_euler(key):
+    "(riemann_commun : bool, types scalaires (3,) de rho, u, p) pour generate_initial_data_euler(key)."
+    k_rho, k_u, k_p, k_mode, _, _, _ = random.split(key, 7)
+    riemann = random.bernoulli(k_mode, P_RIEMANN)
+    return riemann, jnp.stack([ic_type_scalar(k) for k in (k_rho, k_u, k_p)])
+
+
 def generate_initial_data_euler(key):
     """U0 : (3, n), variables conservatives (rho, rho*u, E). Une forme indépendante par variable
     primitive ; l'exponentielle garantit rho > 0 et p > 0."""
     RHO_REF = 1.0
     P_REF   = 1.0
     U_MAX   = 1.0
-    P_RIEMANN = 0.25          # part des tirages avec un saut de rho, u et p au même endroit
 
     k_rho, k_u, k_p, k_mode, k_split, k_L, k_R = random.split(key, 7)
     # clip : make_constante n'est pas renormalisée et peut aller jusqu'à +-5
