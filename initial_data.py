@@ -177,10 +177,12 @@ def generate_initial_data_euler(key):
     f_p   = jnp.clip(generate_initial_data(k_p), -1.0, 1.0)
 
     # Riemann commun : une seule position de saut, états gauche et droit indépendants
-    # (par périodicité, un second saut en x = 0)
+    # (par périodicité, un second saut en x = 0). Plage élargie pour rho et p seulement :
+    # f dans [-1.5, 1.5] -> rapports de saut jusqu'à e^3 ≈ 20 (Sod : 8 en rho, 10 en p) ; u reste dans [-1, 1]
+    AMP_RIEMANN = jnp.array([[1.5], [1.0], [1.5]])                      # (rho, u, p)
     split     = random.uniform(k_split, (), minval=0.0, maxval=1.0)
-    f_L       = random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
-    f_R       = random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
+    f_L       = AMP_RIEMANN * random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
+    f_R       = AMP_RIEMANN * random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
     f_riemann = jnp.where(x < split, f_L, f_R)                          # (3, n)
     f_rho, f_u, f_p = jnp.where(random.bernoulli(k_mode, P_RIEMANN), f_riemann, jnp.stack([f_rho, f_u, f_p]))
 
