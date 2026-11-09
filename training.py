@@ -102,7 +102,7 @@ def generate_onpolicy_pairs(key, params):
 
     u_finals_true = jax.vmap(relabel)(u0s_corrupted)
 
-    return u0s_corrupted, u_finals_true, jnp.sum(n_valid <= ONPOLICY_MAX_STEPS)
+    return u0s_corrupted, u_finals_true, jnp.sum(n_valid <= ONPOLICY_MAX_STEPS), jnp.mean(n_valid)
 
 
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
@@ -238,14 +238,16 @@ if ONPOLICY_ENABLED:
 u0s_epoch, u_finals_epoch = u0s_training, u_finals_training
 N_epoch = N_TRAIN
 n_batches_epoch = n_batches
+u0s_onpolicy = None   # dernières paires on-policy générées, pour le diagnostic
 
 for epoch in range(start_epoch, nb_epoch):
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
-        u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy = generate_onpolicy_pairs(key_onpolicy, params)
+        u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy, n_valid_mean = generate_onpolicy_pairs(key_onpolicy, params)
         n_bad_onpolicy = int(n_bad_onpolicy)
         print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy deviennent "
-              f"non admissibles (rho<=0, p<=0 ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant).")
+              f"non admissibles (rho<=0, p<=0 ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant), "
+              f"états valides moyens : {float(n_valid_mean):.1f}/{ONPOLICY_MAX_STEPS + 1}.")
         u0s_epoch      = jnp.concatenate([u0s_training, u0s_onpolicy], axis=0)
         u_finals_epoch = jnp.concatenate([u_finals_training, u_finals_onpolicy], axis=0)
         N_epoch         = u0s_epoch.shape[0]
@@ -277,6 +279,13 @@ for epoch in range(start_epoch, nb_epoch):
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
               f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker}")
+
+        if u0s_onpolicy is not None:
+            # loss sur les états produits par le réseau lui-même : c'est là que l'on-policy doit agir
+            n_batches_onpolicy = max(1, u0s_onpolicy.shape[0] // batch_size)
+            metrics_onpolicy = eval_losses(params, u0s_onpolicy, u_finals_onpolicy, n_batches_onpolicy)
+            detail_onpolicy = " ".join(f"{k}={v:.6f}" for k, v in metrics_onpolicy.items() if k != "loss")
+            print(f"           OnPolicy: {metrics_onpolicy['loss']:.6f} ({detail_onpolicy})")
         losses_training.append(float(loss_train))
         losses_validation.append(float(loss_val))
 
