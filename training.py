@@ -14,7 +14,7 @@ from network_parameters import (
 )
 from initial_data import generate_initial_data, generate_initial_data_euler
 from euler_solver import primitives, gamma
-from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc
+from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc, bloc
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -62,42 +62,39 @@ def generate_trajectory(key):
     return u0s, u_finals, ts, speeds
 
 
-def model_step(params, u):
-    F = predict_F(params, u)
-    return u - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
-
-
-EPS_MAXPRINCIPLE = 0.05   # tolérance de dépassement de [min u0, max u0]
+def admissible(U):
+    "Etat (3, n) physiquement admissible : rho > 0, p > 0, tout fini (NaN -> False)."
+    rho, _, p = primitives(U)
+    return jnp.all(jnp.isfinite(U)) & jnp.all(rho > 0) & jnp.all(p > 0)
 
 
 @jax.jit
 def generate_onpolicy_pairs(key, params):
 
     key_ic, key_depth = random.split(key)
-    ics = jax.vmap(generate_initial_data)(random.split(key_ic, ONPOLICY_TRAJ))
+    ics = jax.vmap(generate_initial_data_euler)(random.split(key_ic, ONPOLICY_TRAJ))  # (ONPOLICY_TRAJ, 3, n)
 
     def rollout_model(u0):
         def body(u, _):
-            u_next = model_step(params, u)
+            u_next, _ = bloc(params, u)   # un bloc du réseau en vraies valeurs (normalisation par V incluse)
             return u_next, u_next
         _, states = jax.lax.scan(body, u0, None, length=ONPOLICY_MAX_STEPS)
-        return jnp.concatenate([u0[None], states], axis=0)  # (ONPOLICY_MAX_STEPS+1, n), indice 0 = IC
+        return jnp.concatenate([u0[None], states], axis=0)  # (ONPOLICY_MAX_STEPS+1, 3, n), indice 0 = IC
 
-    all_states = jax.vmap(rollout_model)(ics)  # (ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS+1, n)
+    all_states = jax.vmap(rollout_model)(ics)  # (ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS+1, 3, n)
 
-    # principe du maximum : un état hors [min u0, max u0] (ou NaN) est déjà faux, et sa
-    # cible sort du cône couvert par la fenêtre P, Q -> on tronque la trajectoire avant
-    lo = jnp.min(ics, axis=-1)[:, None, None] - EPS_MAXPRINCIPLE
-    hi = jnp.max(ics, axis=-1)[:, None, None] + EPS_MAXPRINCIPLE
-    ok = jnp.all((all_states >= lo) & (all_states <= hi), axis=-1)     # (ONPOLICY_TRAJ, MAX_STEPS+1), NaN -> False
+    # pas de principe du maximum pour Euler (les chocs créent des extrema) : on tronque la
+    # trajectoire avant le 1er état non admissible (rho <= 0, p <= 0 ou NaN), où le solveur
+    # de relabelling ne serait plus défini
+    ok = jax.vmap(jax.vmap(admissible))(all_states)                     # (ONPOLICY_TRAJ, MAX_STEPS+1)
     ok = jnp.concatenate([ok, jnp.zeros((ok.shape[0], 1), bool)], axis=1)
-    n_valid = jnp.argmin(ok, axis=1)                                    # 1er état hors domaine, >= 1 (IC ok)
+    n_valid = jnp.argmin(ok, axis=1)                                    # 1er état non admissible, >= 1 (IC ok)
 
     r = random.uniform(key_depth, (ONPOLICY_TRAJ, ONPOLICY_DEPTHS_PER_TRAJ))
     depths = jnp.floor(r * n_valid[:, None]).astype(jnp.int32)          # dans [0, n_valid)
-    gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps+1,n),(k,) -> (k,n)
-    u0s_corrupted = jax.lax.stop_gradient(gather_traj(all_states, depths))  # (ONPOLICY_TRAJ, k, n)
-    u0s_corrupted = u0s_corrupted.reshape(-1, u0s_corrupted.shape[-1])      # (ONPOLICY_TRAJ*k, n)
+    gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps+1,3,n),(k,) -> (k,3,n)
+    u0s_corrupted = jax.lax.stop_gradient(gather_traj(all_states, depths))  # (ONPOLICY_TRAJ, k, 3, n)
+    u0s_corrupted = u0s_corrupted.reshape(-1, *u0s_corrupted.shape[-2:])    # (ONPOLICY_TRAJ*k, 3, n)
 
     def relabel(u):
         u_true_next, _, _ = _solver(u, T_bloc(u))
@@ -247,8 +244,8 @@ for epoch in range(start_epoch, nb_epoch):
         key_train, key_onpolicy = random.split(key_train)
         u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy = generate_onpolicy_pairs(key_onpolicy, params)
         n_bad_onpolicy = int(n_bad_onpolicy)
-        print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy sortent de "
-              f"[min u0, max u0] avant {ONPOLICY_MAX_STEPS} pas (tronquées avant la sortie).")
+        print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy deviennent "
+              f"non admissibles (rho<=0, p<=0 ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant).")
         u0s_epoch      = jnp.concatenate([u0s_training, u0s_onpolicy], axis=0)
         u_finals_epoch = jnp.concatenate([u_finals_training, u_finals_onpolicy], axis=0)
         N_epoch         = u0s_epoch.shape[0]
