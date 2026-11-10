@@ -147,6 +147,9 @@ def generate_initial_data(key, nb_frequences=K, x=x):
 
 
 P_RIEMANN = 0.25          # part des tirages Euler avec un saut de rho, u et p au même endroit
+P_CONST   = 0.3           # proba qu'une variable primitive soit constante sur tout le domaine (Riemann compris)
+P_U_ZERO  = 0.5           # si u est constante : proba que u = 0 exactement (fluide au repos)
+AMP_MIN   = 0.05          # amplitude A des formes non constantes, log-uniforme dans [AMP_MIN, 1]
 
 
 # Diagnostic : retrouve le type d'une CI à partir de sa clé, sans la regénérer.
@@ -176,15 +179,31 @@ def generate_initial_data_euler(key):
     f_u   = jnp.clip(generate_initial_data(k_u), -1.0, 1.0)
     f_p   = jnp.clip(generate_initial_data(k_p), -1.0, 1.0)
 
+    # amplitude et fond aléatoires : f = c + A * forme, A log-uniforme dans [AMP_MIN, 1], |c| <= 1 - A
+    # -> petites perturbations sur un fond quelconque, f reste dans [-1, 1]
+    # clés tirées par fold_in pour ne pas changer les random.split existants (diagnostic ic_types_euler)
+    k_A, k_c, k_const, k_lvl, k_u0 = random.split(random.fold_in(key, 1), 5)
+    A = jnp.exp(random.uniform(k_A, (3, 1), minval=jnp.log(AMP_MIN), maxval=0.0))
+    c = random.uniform(k_c, (3, 1), minval=-1.0, maxval=1.0) * (1.0 - A)
+    f_rho, f_u, f_p = c + A * jnp.stack([f_rho, f_u, f_p])
+
     # Riemann commun : une seule position de saut, états gauche et droit indépendants
     # (par périodicité, un second saut en x = 0). Plage élargie pour rho et p seulement :
-    # f dans [-1.5, 1.5] -> rapports de saut jusqu'à e^3 ≈ 20 (Sod : 8 en rho, 10 en p) ; u reste dans [-1, 1]
-    AMP_RIEMANN = jnp.array([[1.5], [1.0], [1.5]])                      # (rho, u, p)
+    # rho : f dans [-1.5, 1.5] -> rapports jusqu'à e^3 ≈ 20 (Sod : 8) ;
+    # p   : f dans [-6, 6]     -> rapports jusqu'à e^12 ≈ 1.6e5 (blast : 1e5) ; u reste dans [-1, 1]
+    AMP_RIEMANN = jnp.array([[1.5], [1.0], [6.0]])                      # (rho, u, p)
     split     = random.uniform(k_split, (), minval=0.0, maxval=1.0)
     f_L       = AMP_RIEMANN * random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
     f_R       = AMP_RIEMANN * random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
     f_riemann = jnp.where(x < split, f_L, f_R)                          # (3, n)
     f_rho, f_u, f_p = jnp.where(random.bernoulli(k_mode, P_RIEMANN), f_riemann, jnp.stack([f_rho, f_u, f_p]))
+
+    # constantes : chaque variable, avec proba P_CONST, devient constante (niveau uniforme dans [-1, 1]),
+    # Riemann compris -> ex. blast / Sod : rho et u constants, seul p saute. u constante -> u = 0 avec proba P_U_ZERO
+    const = random.bernoulli(k_const, P_CONST, (3, 1))
+    lvl   = random.uniform(k_lvl, (3, 1), minval=-1.0, maxval=1.0)
+    lvl   = lvl.at[1].set(jnp.where(random.bernoulli(k_u0, P_U_ZERO), 0.0, lvl[1]))
+    f_rho, f_u, f_p = jnp.where(const, lvl, jnp.stack([f_rho, f_u, f_p]))
 
     rho = RHO_REF * jnp.exp(f_rho)      # rho dans [RHO_REF / e, RHO_REF * e]
     u   = U_MAX * f_u
