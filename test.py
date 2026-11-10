@@ -33,7 +33,7 @@ if "kernel" in params["params"]:
 # résolution, rien d'autre à changer.
 # ------------------------------------------------------------------
 RESOLUTIONS = [256]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
-PERF_RESOLUTIONS = [256,512,1024]odèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
+PERF_RESOLUTIONS = [256,512,1024]   # perf modèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
 
 
 def make_grid(N):
@@ -383,43 +383,43 @@ if MAKE_MOVIES:
         for name in EXTRA_MOVIE_FUNCTIONS:
             make_movie(name, N, MOVIE_TIME)
 
-# if SOLVER != "advection":
-#     def euler_step_cfl(U):
-#         "Un pas du schéma, dt = cfl*dx/V, jamais clampé sur T."
-#         dx = 1.0 / U.shape[-1]
-#         dt = cfl * dx / V_max(U)
-#         f_face = flux(U, jnp.roll(U, -1, axis=-1))
-#         U_new = U - dt / dx * (f_face - jnp.roll(f_face, 1, axis=-1))
-#         return U_new, dt
+if SOLVER != "advection":
+    def euler_step_cfl(U):
+        "Un pas du schéma, dt = cfl*dx/V, jamais clampé sur T."
+        dx = 1.0 / U.shape[-1]
+        dt = cfl * dx / V_max(U)
+        f_face = flux(U, jnp.roll(U, -1, axis=-1))
+        U_new = U - dt / dx * (f_face - jnp.roll(f_face, 1, axis=-1))
+        return U_new, dt
 
-#     @jax.jit
-#     def euler_rollout_cfl(u0, t_final):
-#         "Solveur pas-à-pas classique : avance en pas dt naturels jusqu'à t_final."
-#         def cond_fn(carry):
-#             u, t, n_dt = carry
-#             return t < t_final
+    @jax.jit
+    def euler_rollout_cfl(u0, t_final):
+        "Solveur pas-à-pas classique : avance en pas dt naturels jusqu'à t_final."
+        def cond_fn(carry):
+            u, t, n_dt = carry
+            return t < t_final
 
-#         def body_fn(carry):
-#             u, t, n_dt = carry
-#             u_new, dt = euler_step_cfl(u)
-#             return (u_new, t + dt, n_dt + 1)
+        def body_fn(carry):
+            u, t, n_dt = carry
+            u_new, dt = euler_step_cfl(u)
+            return (u_new, t + dt, n_dt + 1)
 
-#         return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
+        return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
 
-#     print("\n--- Perf : modèle (blocs CFL adaptatifs) vs solveur pas-à-pas ---")
-#     for N in PERF_RESOLUTIONS:
-#         perf_functions = test_functions.get(N) or make_test_functions(make_grid(N))
-#         for name in FUNCTION_NAMES:
-#             u0 = perf_functions[name]
-#             for t_phys in PHYSICAL_TIMES:
-#                 (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
-#                 (u_solver, _, n_dt_steps), t_solver = _bench(euler_rollout_cfl, u0, t_phys)
+    print("\n--- Perf : modèle (blocs CFL adaptatifs) vs solveur pas-à-pas ---")
+    for N in PERF_RESOLUTIONS:
+        perf_functions = test_functions.get(N) or make_test_functions(make_grid(N))
+        for name in FUNCTION_NAMES:
+            u0 = perf_functions[name]
+            for t_phys in PHYSICAL_TIMES:
+                (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
+                (u_solver, _, n_dt_steps), t_solver = _bench(euler_rollout_cfl, u0, t_phys)
 
-#                 rel = l2(u_model - u_solver) / (l2(u_solver) + 1e-12)
-#                 speedup = t_solver / t_model if t_model > 0 else float('nan')
-#                 print(f"[N={N}] [{name}] t={t_phys:g}  modèle={int(n_steps_model)} blocs ({t_model*1e3:.2f}ms)  "
-#                       f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  "
-#                       f"err. rel. rho={float(rel[0]):.2e} m={float(rel[1]):.2e} E={float(rel[2]):.2e}  (×{speedup:.1f})")
+                rel = l2(u_model - u_solver) / (l2(u_solver) + 1e-12)
+                speedup = t_solver / t_model if t_model > 0 else float('nan')
+                print(f"[N={N}] [{name}] t={t_phys:g}  modèle={int(n_steps_model)} blocs ({t_model*1e3:.2f}ms)  "
+                      f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  "
+                      f"err. rel. rho={float(rel[0]):.2e} m={float(rel[1]):.2e} E={float(rel[2]):.2e}  (×{speedup:.1f})")
 
 # # ------------------------------------------------------------------
 # # Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
