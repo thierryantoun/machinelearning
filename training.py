@@ -11,6 +11,7 @@ import math
 from network_parameters import (
     MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, LAMBDA, a, P, Q,
     ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
+    EPS_ADMISSIBLE,
 )
 from initial_data import generate_initial_data, generate_initial_data_euler, ic_types_euler
 from euler_solver import primitives, gamma
@@ -62,10 +63,15 @@ def generate_trajectory(key):
     return u0s, u_finals, ts, speeds
 
 
-def admissible(U):
-    "Etat (3, n) physiquement admissible : rho > 0, p > 0, tout fini (NaN -> False)."
+def admissible(U, U_ic):
+    """Etat (3, n) gardé : tout fini (NaN -> False) et rho, p pas trop petits par rapport à la CI U_ic :
+    rho > EPS_ADMISSIBLE * min(rho_IC), p > EPS_ADMISSIBLE * min(p_IC). Une seule cellule quasi vide
+    fait exploser V_max, donc fausse la normalisation et T_bloc de tout l'état, et ralentit le solveur."""
     rho, _, p = primitives(U)
-    return jnp.all(jnp.isfinite(U)) & jnp.all(rho > 0) & jnp.all(p > 0)
+    rho_ic, _, p_ic = primitives(U_ic)
+    return (jnp.all(jnp.isfinite(U))
+            & jnp.all(rho > EPS_ADMISSIBLE * jnp.min(rho_ic))
+            & jnp.all(p > EPS_ADMISSIBLE * jnp.min(p_ic)))
 
 
 @jax.jit
@@ -86,9 +92,9 @@ def generate_onpolicy_pairs(key, params):
     all_states = jax.vmap(rollout_model)(ics)  # (ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS+1, 3, n)
 
     # pas de principe du maximum pour Euler (les chocs créent des extrema) : on tronque la
-    # trajectoire avant le 1er état non admissible (rho <= 0, p <= 0 ou NaN), où le solveur
-    # de relabelling ne serait plus défini
-    ok = jax.vmap(jax.vmap(admissible))(all_states)                     # (ONPOLICY_TRAJ, MAX_STEPS+1)
+    # trajectoire avant le 1er état non admissible (rho ou p sous EPS_ADMISSIBLE * min de la CI,
+    # ou NaN), où le relabelling serait mal conditionné ou indéfini
+    ok = jax.vmap(lambda states, ic: jax.vmap(lambda U: admissible(U, ic))(states))(all_states, ics)  # (ONPOLICY_TRAJ, MAX_STEPS+1)
     ok = jnp.concatenate([ok, jnp.zeros((ok.shape[0], 1), bool)], axis=1)
     n_valid = jnp.argmin(ok, axis=1)                                    # 1er état non admissible, >= 1 (IC ok)
 
@@ -283,7 +289,7 @@ for epoch in range(start_epoch, nb_epoch):
          last_states_onpolicy, fail_onpolicy, ic_info_onpolicy) = generate_onpolicy_pairs(key_onpolicy, params)
         n_bad_onpolicy = int(n_bad_onpolicy)
         print(f"  epoch {epoch} : {n_bad_onpolicy}/{ONPOLICY_TRAJ} trajectoires on-policy deviennent "
-              f"non admissibles (rho<=0, p<=0 ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant), "
+              f"non admissibles (rho ou p < {EPS_ADMISSIBLE:g} x min CI, ou NaN) avant {ONPOLICY_MAX_STEPS} pas (tronquées avant), "
               f"états valides moyens : {float(n_valid_mean):.1f}/{ONPOLICY_MAX_STEPS + 1}.")
         u0s_epoch      = jnp.concatenate([u0s_training, u0s_onpolicy], axis=0)
         u_finals_epoch = jnp.concatenate([u_finals_training, u_finals_onpolicy], axis=0)
