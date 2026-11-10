@@ -51,10 +51,11 @@ def T_bloc(U):
 
 # un bloc du réseau sur les vraies valeurs
 def bloc(params, U):
-    T = T_bloc(U)
-    F = predict_F(params, U)
-    U = U - T * U.shape[-1] * (F - jnp.roll(F, 1, axis=-1))   # T / dx = LAMBDA / V
-    return U, T
+    V   = V_max(U)
+    U_t = normalise(U, V)
+    F_t = predict_F(params, U_t)
+    U_t = U_t - LAMBDA * (F_t - jnp.roll(F_t, 1, axis=-1))
+    return denormalise(U_t, V), T_bloc(U)
 
 
 # blocs du réseau tant qu'on ne dépasse pas T_final ; le réseau est entraîné à lambda fixe,
@@ -96,9 +97,11 @@ def loss_positivite(u_pred, u_cible):  # (batch, 3, n) chacun
 
 # u0s_batch, u_finals_batch : (batch, 3, n), vraies valeurs, u_final à T_bloc(u0) de u0
 def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
-    Vs = jax.vmap(V_max)(u0s_batch)                              # (batch,), pas de normalisation : vraies valeurs
+    Vs = jax.vmap(V_max)(u0s_batch)
+    u0s_batch      = jax.vmap(normalise)(u0s_batch, Vs)        # entrée et cible avec le même V, celui de l'entrée
+    u_finals_batch = jax.vmap(normalise)(u_finals_batch, Vs)
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    u_pred = u0s_batch - (LAMBDA / Vs)[:, None, None] * (F_pred - jnp.roll(F_pred, 1, axis=-1))  # T / dx = LAMBDA / V
+    u_pred = u0s_batch - LAMBDA * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
     # norme L2 moyenne sur le batch, par variable : E ne domine pas rho, et rho*u peut être nul sur une trajectoire.
