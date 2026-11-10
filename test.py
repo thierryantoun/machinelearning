@@ -33,7 +33,7 @@ if "kernel" in params["params"]:
 # résolution, rien d'autre à changer.
 # ------------------------------------------------------------------
 RESOLUTIONS = [256]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
-PERF_RESOLUTIONS = [8192]   # perf modèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
+PERF_RESOLUTIONS = [256,512,1024]odèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
 
 
 def make_grid(N):
@@ -166,158 +166,158 @@ FUNCTION_NAMES = list(test_functions[RESOLUTIONS[0]])
 # Temps physiques fixes : le nombre de blocs dépend de la grille et de l'état.
 PHYSICAL_TIMES = [T]   # T de network_parameters ; ex. [0.1, 1, T] pour plusieurs horizons
 
-print(f"lambda = {LAMBDA:g} fixé ; " + ", ".join(
-    f"N={N} : T*V={T_of(N):g}, {make_grid(N).shape[0]} points" for N in RESOLUTIONS))
+# print(f"lambda = {LAMBDA:g} fixé ; " + ", ".join(
+#     f"N={N} : T*V={T_of(N):g}, {make_grid(N).shape[0]} points" for N in RESOLUTIONS))
 
-# ------------------------------------------------------------------
-# Erreur à UN pas, par résolution (protocole étape 2). Prédiction du doc :
-# erreur par pas du même ordre aux trois résolutions, pas d'explosion en
-# x = 0.5. On affiche l'erreur relative L2 (comme la loss) et l'endroit de
-# l'erreur ponctuelle max.
-# ------------------------------------------------------------------
-print("\n--- Erreur à un pas (relative L2 rho, m, E | max |err| @ x) ---")
-print(f"{'traj':<14}" + "".join(f"{'N=' + str(N):>50}" for N in RESOLUTIONS))
-for name in FUNCTION_NAMES:
-    row = f"{name:<14}"
-    for N in RESOLUTIONS:
-        u0 = test_functions[N][name]
-        u_true = solver(u0)[0]
-        u_pred = step(u0)
-        err = u_pred - u_true
-        rel = l2(err) / (l2(u_true) + 1e-12)
-        err_max = jnp.max(jnp.abs(err), axis=0)
-        j = int(jnp.argmax(err_max))
-        row += (f"{float(rel[0]):>10.2e} {float(rel[1]):>9.2e} {float(rel[2]):>9.2e}"
-                f" | {float(err_max[j]):.2e} @ {float(grids[N][j]):.3f}")
-    print(row)
+# # ------------------------------------------------------------------
+# # Erreur à UN pas, par résolution (protocole étape 2). Prédiction du doc :
+# # erreur par pas du même ordre aux trois résolutions, pas d'explosion en
+# # x = 0.5. On affiche l'erreur relative L2 (comme la loss) et l'endroit de
+# # l'erreur ponctuelle max.
+# # ------------------------------------------------------------------
+# print("\n--- Erreur à un pas (relative L2 rho, m, E | max |err| @ x) ---")
+# print(f"{'traj':<14}" + "".join(f"{'N=' + str(N):>50}" for N in RESOLUTIONS))
+# for name in FUNCTION_NAMES:
+#     row = f"{name:<14}"
+#     for N in RESOLUTIONS:
+#         u0 = test_functions[N][name]
+#         u_true = solver(u0)[0]
+#         u_pred = step(u0)
+#         err = u_pred - u_true
+#         rel = l2(err) / (l2(u_true) + 1e-12)
+#         err_max = jnp.max(jnp.abs(err), axis=0)
+#         j = int(jnp.argmax(err_max))
+#         row += (f"{float(rel[0]):>10.2e} {float(rel[1]):>9.2e} {float(rel[2]):>9.2e}"
+#                 f" | {float(err_max[j]):.2e} @ {float(grids[N][j]):.3f}")
+#     print(row)
 
-# ------------------------------------------------------------------
-# Test d'exactitude de l'invariance (doc §2) : sur la grille m*n, le champ
-# u0(m x) échantillonné vaut exactement u0 sur la grille n répété m fois
-# (jnp.tile, u0 périodique de période 1). Toutes les opérations étant en
-# cellules (fenêtres, couches ponctuelles, R interpolé qui tombe exactement
-# sur la table aux modes multiples de m), F, le pas du modèle et le pas du
-# solveur doivent être ceux de la grille n, répétés m fois, à l'arrondi
-# float32 près (~1e-6). Un écart plus grand = bug d'implémentation, pas un
-# défaut de généralisation.
-# ------------------------------------------------------------------
-EXACT_TOL = 1e-4
+# # ------------------------------------------------------------------
+# # Test d'exactitude de l'invariance (doc §2) : sur la grille m*n, le champ
+# # u0(m x) échantillonné vaut exactement u0 sur la grille n répété m fois
+# # (jnp.tile, u0 périodique de période 1). Toutes les opérations étant en
+# # cellules (fenêtres, couches ponctuelles, R interpolé qui tombe exactement
+# # sur la table aux modes multiples de m), F, le pas du modèle et le pas du
+# # solveur doivent être ceux de la grille n, répétés m fois, à l'arrondi
+# # float32 près (~1e-6). Un écart plus grand = bug d'implémentation, pas un
+# # défaut de généralisation.
+# # ------------------------------------------------------------------
+# EXACT_TOL = 1e-4
 
-print(f"\n--- Test d'exactitude : u0(m x) sur N = m*{n}  vs  u0(x) sur N = {n} répété m fois ---")
-print("    (écart max absolu ; attendu ~1e-6)")
-print(f"{'traj':<14}{'N':>6}{'F':>12}{'pas modèle':>12}{'pas solveur':>13}")
-exact_ok = True
-for name in FUNCTION_NAMES:
-    u0_ref = make_test_functions(make_grid(n))[name]
-    F_ref, u_model_ref, u_true_ref = predict_F(params, normalise(u0_ref, V_max(u0_ref))), step(u0_ref), solver(u0_ref)[0]
-    for N in RESOLUTIONS:
-        if N == n or N % n != 0:
-            continue
-        m = N // n
-        u0_m = jnp.tile(u0_ref, m)
-        gaps = [float(jnp.max(jnp.abs(a - jnp.tile(b, m)))) for a, b in (
-            (predict_F(params, normalise(u0_m, V_max(u0_m))), F_ref),
-            (step(u0_m), u_model_ref),
-            (solver(u0_m)[0], u_true_ref),
-        )]
-        exact_ok &= max(gaps) < EXACT_TOL
-        print(f"{name:<14}{N:>6}" + "".join(f"{g:>12.2e}" for g in gaps[:2]) + f"{gaps[2]:>13.2e}")
-print("=> invariance exacte OK" if exact_ok else
-      f"=> ÉCART > {EXACT_TOL:g} : l'implémentation n'est pas exactement en unités de cellules")
+# print(f"\n--- Test d'exactitude : u0(m x) sur N = m*{n}  vs  u0(x) sur N = {n} répété m fois ---")
+# print("    (écart max absolu ; attendu ~1e-6)")
+# print(f"{'traj':<14}{'N':>6}{'F':>12}{'pas modèle':>12}{'pas solveur':>13}")
+# exact_ok = True
+# for name in FUNCTION_NAMES:
+#     u0_ref = make_test_functions(make_grid(n))[name]
+#     F_ref, u_model_ref, u_true_ref = predict_F(params, normalise(u0_ref, V_max(u0_ref))), step(u0_ref), solver(u0_ref)[0]
+#     for N in RESOLUTIONS:
+#         if N == n or N % n != 0:
+#             continue
+#         m = N // n
+#         u0_m = jnp.tile(u0_ref, m)
+#         gaps = [float(jnp.max(jnp.abs(a - jnp.tile(b, m)))) for a, b in (
+#             (predict_F(params, normalise(u0_m, V_max(u0_m))), F_ref),
+#             (step(u0_m), u_model_ref),
+#             (solver(u0_m)[0], u_true_ref),
+#         )]
+#         exact_ok &= max(gaps) < EXACT_TOL
+#         print(f"{name:<14}{N:>6}" + "".join(f"{g:>12.2e}" for g in gaps[:2]) + f"{gaps[2]:>13.2e}")
+# print("=> invariance exacte OK" if exact_ok else
+#       f"=> ÉCART > {EXACT_TOL:g} : l'implémentation n'est pas exactement en unités de cellules")
 
-# ------------------------------------------------------------------
-# Riemann vu EN CELLULES autour du saut initial (x = 0.5).
-# Un saut est un saut sur une cellule à toute résolution : à lambda fixé,
-# les fenêtres autour du choc sont identiques cellule par cellule à
-# 256, 512 et 1024 points (l'autre saut, en x = 0, est à >= 128 cellules,
-# hors de la fenêtre de P+Q+1 cellules). La partie LOCALE du réseau rend
-# donc la même sortie partout : on attend un écart ~1e-6 (float32).
-# ------------------------------------------------------------------
-CELL_HALF_WIDTH = 40          # cellules affichées de part et d'autre du saut
-CELL_FUNCTIONS  = ["riemann"]
+# # ------------------------------------------------------------------
+# # Riemann vu EN CELLULES autour du saut initial (x = 0.5).
+# # Un saut est un saut sur une cellule à toute résolution : à lambda fixé,
+# # les fenêtres autour du choc sont identiques cellule par cellule à
+# # 256, 512 et 1024 points (l'autre saut, en x = 0, est à >= 128 cellules,
+# # hors de la fenêtre de P+Q+1 cellules). La partie LOCALE du réseau rend
+# # donc la même sortie partout : on attend un écart ~1e-6 (float32).
+# # ------------------------------------------------------------------
+# CELL_HALF_WIDTH = 40          # cellules affichées de part et d'autre du saut
+# CELL_FUNCTIONS  = ["riemann"]
 
-jj = jnp.arange(-CELL_HALF_WIDTH, CELL_HALF_WIDTH + 1)
-print(f"\n--- Riemann en cellules : écart max à N={RESOLUTIONS[0]}, sur ±{CELL_HALF_WIDTH} cellules du saut ---")
-print(f"    (attendu ~1e-6 : réseau purement local)")
-for name in CELL_FUNCTIONS:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
-    ref_pred = ref_true = None
-    for N in RESOLUTIONS:
-        u0 = test_functions[N][name]
-        j0 = N // 2                                   # saut initial en x = 0.5
-        up = step(u0)[0, j0 + jj]                     # rho
-        ut = solver(u0)[0][0, j0 + jj]
-        axes[0].plot(jj, up, "o-", ms=3, lw=1, label=f"modèle N={N}")
-        if N == RESOLUTIONS[0]:
-            axes[0].plot(jj, ut, "k--", lw=1.2, label=f"cible N={N}")
-            ref_pred, ref_true = up, ut
-        else:
-            axes[1].plot(jj, up - ref_pred, "o-", ms=3, lw=1, label=f"modèle N={N} − N={RESOLUTIONS[0]}")
-            axes[1].plot(jj, ut - ref_true, "--", lw=1, label=f"cible N={N} − N={RESOLUTIONS[0]}")
-            print(f"[{name}] N={N} : modèle {float(jnp.max(jnp.abs(up - ref_pred))):.2e}   "
-                  f"cible {float(jnp.max(jnp.abs(ut - ref_true))):.2e}")
-    axes[0].set_title(f"rho de « {name} » après 1 pas, en cellules (lambda={LAMBDA:g})")
-    axes[1].set_title(f"écart à N={RESOLUTIONS[0]}, cellule par cellule")
-    for ax in axes:
-        ax.set_xlabel("cellules depuis le saut initial (x = 0.5)")
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8)
-    fig.tight_layout()
-    out_path = f"cellules_{name}.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Figure sauvegardée : {out_path}")
+# jj = jnp.arange(-CELL_HALF_WIDTH, CELL_HALF_WIDTH + 1)
+# print(f"\n--- Riemann en cellules : écart max à N={RESOLUTIONS[0]}, sur ±{CELL_HALF_WIDTH} cellules du saut ---")
+# print(f"    (attendu ~1e-6 : réseau purement local)")
+# for name in CELL_FUNCTIONS:
+#     fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
+#     ref_pred = ref_true = None
+#     for N in RESOLUTIONS:
+#         u0 = test_functions[N][name]
+#         j0 = N // 2                                   # saut initial en x = 0.5
+#         up = step(u0)[0, j0 + jj]                     # rho
+#         ut = solver(u0)[0][0, j0 + jj]
+#         axes[0].plot(jj, up, "o-", ms=3, lw=1, label=f"modèle N={N}")
+#         if N == RESOLUTIONS[0]:
+#             axes[0].plot(jj, ut, "k--", lw=1.2, label=f"cible N={N}")
+#             ref_pred, ref_true = up, ut
+#         else:
+#             axes[1].plot(jj, up - ref_pred, "o-", ms=3, lw=1, label=f"modèle N={N} − N={RESOLUTIONS[0]}")
+#             axes[1].plot(jj, ut - ref_true, "--", lw=1, label=f"cible N={N} − N={RESOLUTIONS[0]}")
+#             print(f"[{name}] N={N} : modèle {float(jnp.max(jnp.abs(up - ref_pred))):.2e}   "
+#                   f"cible {float(jnp.max(jnp.abs(ut - ref_true))):.2e}")
+#     axes[0].set_title(f"rho de « {name} » après 1 pas, en cellules (lambda={LAMBDA:g})")
+#     axes[1].set_title(f"écart à N={RESOLUTIONS[0]}, cellule par cellule")
+#     for ax in axes:
+#         ax.set_xlabel("cellules depuis le saut initial (x = 0.5)")
+#         ax.grid(True, alpha=0.3)
+#         ax.legend(fontsize=8)
+#     fig.tight_layout()
+#     out_path = f"cellules_{name}.png"
+#     fig.savefig(out_path, dpi=150)
+#     plt.close(fig)
+#     print(f"Figure sauvegardée : {out_path}")
 
-# ------------------------------------------------------------------
-# Snapshots : cible vs modèle au temps de n_blocks blocs estimé avec le V de u0,
-# une colonne par résolution, une ligne par variable (rho, u, p).
-# Un bloc dure T_of(N) / V : même lambda, même nombre de pas à toute résolution
-# -> c'est la comparaison directe de l'invariance du doc §2.
-# ------------------------------------------------------------------
-SNAPSHOT_BLOCKS = [10]   # nombres de blocs (ex: [1, 10, 100])
-SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
-
-
-def make_snapshot(name, n_steps):
-    fig, axes = plt.subplots(3, len(RESOLUTIONS), figsize=(6 * len(RESOLUTIONS), 10),
-                             sharex=True, squeeze=False)
-    for col, N in enumerate(RESOLUTIONS):
-        x, u0 = grids[N], test_functions[N][name]
-        t_final = n_steps * T_of(N) / float(V_max(u0))
-
-        u_true = solver_rollout(u0, t_final)
-        u_pred, n_blocks = model_rollout(u0, t_final)   # même temps physique que la cible
-
-        for row, (label, v0, v_true, v_pred) in enumerate(zip(
-                ("rho", "u", "p"), primitives(u0), primitives(u_true), primitives(u_pred))):
-            ax = axes[row][col]
-            ax.plot(x, v0, label='état initial', linestyle='--', alpha=0.4, color='gray')
-            ax.plot(x, v_true, label='cible', linewidth=1.5)
-            ax.plot(x, v_pred, label='prédit', linewidth=1.5, linestyle=':')
-            ax.set_ylabel(label)
-            ax.grid(True, alpha=0.3)
-        axes[2][col].set_xlabel('x')
-        axes[0][col].set_title(f"N={N}, {int(n_blocks)} blocs  (t={t_final:g})")
-    axes[0][0].legend(loc='upper right')
-    fig.suptitle(f"« {name} »  —  lambda={LAMBDA:g}")
-    fig.tight_layout()
-    out_path = f"snapshot_{name}_{n_steps}blocs.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Snapshot sauvegardé : {out_path}")
+# # ------------------------------------------------------------------
+# # Snapshots : cible vs modèle au temps de n_blocks blocs estimé avec le V de u0,
+# # une colonne par résolution, une ligne par variable (rho, u, p).
+# # Un bloc dure T_of(N) / V : même lambda, même nombre de pas à toute résolution
+# # -> c'est la comparaison directe de l'invariance du doc §2.
+# # ------------------------------------------------------------------
+# SNAPSHOT_BLOCKS = [10]   # nombres de blocs (ex: [1, 10, 100])
+# SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 
-for name in SNAPSHOT_FUNCTIONS:
-    for n_blocks in SNAPSHOT_BLOCKS:
-        make_snapshot(name, n_blocks)
+# def make_snapshot(name, n_steps):
+#     fig, axes = plt.subplots(3, len(RESOLUTIONS), figsize=(6 * len(RESOLUTIONS), 10),
+#                              sharex=True, squeeze=False)
+#     for col, N in enumerate(RESOLUTIONS):
+#         x, u0 = grids[N], test_functions[N][name]
+#         t_final = n_steps * T_of(N) / float(V_max(u0))
+
+#         u_true = solver_rollout(u0, t_final)
+#         u_pred, n_blocks = model_rollout(u0, t_final)   # même temps physique que la cible
+
+#         for row, (label, v0, v_true, v_pred) in enumerate(zip(
+#                 ("rho", "u", "p"), primitives(u0), primitives(u_true), primitives(u_pred))):
+#             ax = axes[row][col]
+#             ax.plot(x, v0, label='état initial', linestyle='--', alpha=0.4, color='gray')
+#             ax.plot(x, v_true, label='cible', linewidth=1.5)
+#             ax.plot(x, v_pred, label='prédit', linewidth=1.5, linestyle=':')
+#             ax.set_ylabel(label)
+#             ax.grid(True, alpha=0.3)
+#         axes[2][col].set_xlabel('x')
+#         axes[0][col].set_title(f"N={N}, {int(n_blocks)} blocs  (t={t_final:g})")
+#     axes[0][0].legend(loc='upper right')
+#     fig.suptitle(f"« {name} »  —  lambda={LAMBDA:g}")
+#     fig.tight_layout()
+#     out_path = f"snapshot_{name}_{n_steps}blocs.png"
+#     fig.savefig(out_path, dpi=150)
+#     plt.close(fig)
+#     print(f"Snapshot sauvegardé : {out_path}")
+
+
+# for name in SNAPSHOT_FUNCTIONS:
+#     for n_blocks in SNAPSHOT_BLOCKS:
+#         make_snapshot(name, n_blocks)
 
 # ------------------------------------------------------------------
 # Films .mp4 : évolution de la cible et du modèle bloc par bloc jusqu'à
 # MOVIE_TIME, un film par (fonction, résolution). Nécessite ffmpeg
 # (binaire système, ou `pip install imageio-ffmpeg`).
 # ------------------------------------------------------------------
-MAKE_MOVIES = False     # False pour désactiver les films
-MOVIE_TIME = T         # temps physique final du film (T de network_parameters)
+MAKE_MOVIES = True     # False pour désactiver les films
+MOVIE_TIME = 5         # temps physique final du film (T de network_parameters)
 MOVIE_FPS = 20
 MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 MOVIE_RESOLUTIONS = [RESOLUTIONS[0]]   # films coûteux : par défaut la grille d'entraînement seule
@@ -383,126 +383,126 @@ if MAKE_MOVIES:
         for name in EXTRA_MOVIE_FUNCTIONS:
             make_movie(name, N, MOVIE_TIME)
 
-if SOLVER != "advection":
-    def euler_step_cfl(U):
-        "Un pas du schéma, dt = cfl*dx/V, jamais clampé sur T."
-        dx = 1.0 / U.shape[-1]
-        dt = cfl * dx / V_max(U)
-        f_face = flux(U, jnp.roll(U, -1, axis=-1))
-        U_new = U - dt / dx * (f_face - jnp.roll(f_face, 1, axis=-1))
-        return U_new, dt
+# if SOLVER != "advection":
+#     def euler_step_cfl(U):
+#         "Un pas du schéma, dt = cfl*dx/V, jamais clampé sur T."
+#         dx = 1.0 / U.shape[-1]
+#         dt = cfl * dx / V_max(U)
+#         f_face = flux(U, jnp.roll(U, -1, axis=-1))
+#         U_new = U - dt / dx * (f_face - jnp.roll(f_face, 1, axis=-1))
+#         return U_new, dt
 
-    @jax.jit
-    def euler_rollout_cfl(u0, t_final):
-        "Solveur pas-à-pas classique : avance en pas dt naturels jusqu'à t_final."
-        def cond_fn(carry):
-            u, t, n_dt = carry
-            return t < t_final
+#     @jax.jit
+#     def euler_rollout_cfl(u0, t_final):
+#         "Solveur pas-à-pas classique : avance en pas dt naturels jusqu'à t_final."
+#         def cond_fn(carry):
+#             u, t, n_dt = carry
+#             return t < t_final
 
-        def body_fn(carry):
-            u, t, n_dt = carry
-            u_new, dt = euler_step_cfl(u)
-            return (u_new, t + dt, n_dt + 1)
+#         def body_fn(carry):
+#             u, t, n_dt = carry
+#             u_new, dt = euler_step_cfl(u)
+#             return (u_new, t + dt, n_dt + 1)
 
-        return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
+#         return jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
 
-    print("\n--- Perf : modèle (blocs CFL adaptatifs) vs solveur pas-à-pas ---")
-    for N in PERF_RESOLUTIONS:
-        perf_functions = test_functions.get(N) or make_test_functions(make_grid(N))
-        for name in FUNCTION_NAMES:
-            u0 = perf_functions[name]
-            for t_phys in PHYSICAL_TIMES:
-                (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
-                (u_solver, _, n_dt_steps), t_solver = _bench(euler_rollout_cfl, u0, t_phys)
+#     print("\n--- Perf : modèle (blocs CFL adaptatifs) vs solveur pas-à-pas ---")
+#     for N in PERF_RESOLUTIONS:
+#         perf_functions = test_functions.get(N) or make_test_functions(make_grid(N))
+#         for name in FUNCTION_NAMES:
+#             u0 = perf_functions[name]
+#             for t_phys in PHYSICAL_TIMES:
+#                 (u_model, n_steps_model), t_model = _bench(model_rollout, u0, t_phys)
+#                 (u_solver, _, n_dt_steps), t_solver = _bench(euler_rollout_cfl, u0, t_phys)
 
-                rel = l2(u_model - u_solver) / (l2(u_solver) + 1e-12)
-                speedup = t_solver / t_model if t_model > 0 else float('nan')
-                print(f"[N={N}] [{name}] t={t_phys:g}  modèle={int(n_steps_model)} blocs ({t_model*1e3:.2f}ms)  "
-                      f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  "
-                      f"err. rel. rho={float(rel[0]):.2e} m={float(rel[1]):.2e} E={float(rel[2]):.2e}  (×{speedup:.1f})")
+#                 rel = l2(u_model - u_solver) / (l2(u_solver) + 1e-12)
+#                 speedup = t_solver / t_model if t_model > 0 else float('nan')
+#                 print(f"[N={N}] [{name}] t={t_phys:g}  modèle={int(n_steps_model)} blocs ({t_model*1e3:.2f}ms)  "
+#                       f"solveur={int(n_dt_steps)} pas dt ({t_solver*1e3:.2f}ms)  "
+#                       f"err. rel. rho={float(rel[0]):.2e} m={float(rel[1]):.2e} E={float(rel[2]):.2e}  (×{speedup:.1f})")
 
-# ------------------------------------------------------------------
-# Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
-# rollout.
-#   E_B(t)   = Σ_{k∈bande} |û(k,t)|²
-#   ε_B(t)   = |E_B,pred(t) − E_B,true(t)| / (E_B,true(t) + ε)
-# Les bandes sont en nombre d'onde PHYSIQUE k (le même sur toutes les
-# grilles) : low k∈[1,5], mid k∈[6,15], hi1 k∈[16,31], hi2 k∈[32,47],
-# hi3 k∈[48,63], hi4 k∈[64,95], hi5 k∈[96,128]. Au-delà de k=128 (modes
-# qui n'existent qu'à N>256) : bande "fine", k∈[129, N/2]. Calculé sur rho.
-# ε_B est un rapport, donc insensible à la normalisation de la rfft (∝ N²).
-# ------------------------------------------------------------------
-FREQ_BANDS = {
-    "low": (1, 5), "mid": (6, 15), "hi1": (16, 31), "hi2": (32, 47),
-    "hi3": (48, 63), "hi4": (64, 95), "hi5": (96, 128), "fine": (129, None),
-}
-EPS_BAND = 1e-12
-
-
-def band_energy(u):
-    "E_B = Σ_k |û(k)|² pour k dans chaque bande de FREQ_BANDS (bande vide -> 0)."
-    power = jnp.abs(jnp.fft.rfft(u, axis=-1)) ** 2
-    k_last = power.shape[-1] - 1
-    return {name: jnp.sum(power[..., k0:(k_last if k1 is None else k1) + 1], axis=-1)
-            for name, (k0, k1) in FREQ_BANDS.items()}
+# # ------------------------------------------------------------------
+# # Erreur d'énergie par bande de fréquence, en fonction de l'horizon de
+# # rollout.
+# #   E_B(t)   = Σ_{k∈bande} |û(k,t)|²
+# #   ε_B(t)   = |E_B,pred(t) − E_B,true(t)| / (E_B,true(t) + ε)
+# # Les bandes sont en nombre d'onde PHYSIQUE k (le même sur toutes les
+# # grilles) : low k∈[1,5], mid k∈[6,15], hi1 k∈[16,31], hi2 k∈[32,47],
+# # hi3 k∈[48,63], hi4 k∈[64,95], hi5 k∈[96,128]. Au-delà de k=128 (modes
+# # qui n'existent qu'à N>256) : bande "fine", k∈[129, N/2]. Calculé sur rho.
+# # ε_B est un rapport, donc insensible à la normalisation de la rfft (∝ N²).
+# # ------------------------------------------------------------------
+# FREQ_BANDS = {
+#     "low": (1, 5), "mid": (6, 15), "hi1": (16, 31), "hi2": (32, 47),
+#     "hi3": (48, 63), "hi4": (64, 95), "hi5": (96, 128), "fine": (129, None),
+# }
+# EPS_BAND = 1e-12
 
 
-def band_error(u_pred, u_true):
-    "ε_B par bande, entre un champ prédit et sa référence."
-    e_pred, e_true = band_energy(u_pred), band_energy(u_true)
-    return {name: jnp.abs(e_pred[name] - e_true[name]) / (e_true[name] + EPS_BAND) for name in FREQ_BANDS}
+# def band_energy(u):
+#     "E_B = Σ_k |û(k)|² pour k dans chaque bande de FREQ_BANDS (bande vide -> 0)."
+#     power = jnp.abs(jnp.fft.rfft(u, axis=-1)) ** 2
+#     k_last = power.shape[-1] - 1
+#     return {name: jnp.sum(power[..., k0:(k_last if k1 is None else k1) + 1], axis=-1)
+#             for name, (k0, k1) in FREQ_BANDS.items()}
 
 
-def print_band_table(title):
-    print(f"\n--- {title} ---")
-    print(f"{'N':>6}{'traj':>14}{'t':>8}{'n_steps':>9}" + "".join(f"{b:>11}" for b in FREQ_BANDS))
-    for N in RESOLUTIONS:
-        for name in FUNCTION_NAMES:
-            u0 = test_functions[N][name]
-            for t_phys in PHYSICAL_TIMES:
-                u_true = solver_rollout(u0, t_phys)
-                u_pred, n_steps = model_rollout(u0, t_phys)   # même temps physique que la cible
-                errs = band_error(u_pred[0], u_true[0])
-                print(f"{N:>6}{name:>14}{t_phys:>8g}{int(n_steps):>9}"
-                      + "".join(f"{float(errs[b]):>11.2e}" for b in FREQ_BANDS))
+# def band_error(u_pred, u_true):
+#     "ε_B par bande, entre un champ prédit et sa référence."
+#     e_pred, e_true = band_energy(u_pred), band_energy(u_true)
+#     return {name: jnp.abs(e_pred[name] - e_true[name]) / (e_true[name] + EPS_BAND) for name in FREQ_BANDS}
 
 
-print_band_table("Erreur par bande de fréquence")
+# def print_band_table(title):
+#     print(f"\n--- {title} ---")
+#     print(f"{'N':>6}{'traj':>14}{'t':>8}{'n_steps':>9}" + "".join(f"{b:>11}" for b in FREQ_BANDS))
+#     for N in RESOLUTIONS:
+#         for name in FUNCTION_NAMES:
+#             u0 = test_functions[N][name]
+#             for t_phys in PHYSICAL_TIMES:
+#                 u_true = solver_rollout(u0, t_phys)
+#                 u_pred, n_steps = model_rollout(u0, t_phys)   # même temps physique que la cible
+#                 errs = band_error(u_pred[0], u_true[0])
+#                 print(f"{N:>6}{name:>14}{t_phys:>8g}{int(n_steps):>9}"
+#                       + "".join(f"{float(errs[b]):>11.2e}" for b in FREQ_BANDS))
 
-# ------------------------------------------------------------------
-# Croissance de l'erreur ‖rho_n − rho_n(vrai)‖_L2 en fonction du temps physique
-# t_n = somme des T_k : un panneau par fonction test, une courbe par résolution.
-# Si l'invariance tient, les courbes se superposent (à nombre de pas
-# double/quadruple près pour atteindre le même t, cf. doc §8).
-# ------------------------------------------------------------------
-# None -> temps physique max des figures de prédiction (max(PHYSICAL_TIMES))
-ERROR_GROWTH_TIME = None
-error_growth_time = ERROR_GROWTH_TIME if ERROR_GROWTH_TIME is not None else max(PHYSICAL_TIMES)
 
-n_cols = 3
-n_rows = -(-len(FUNCTION_NAMES) // n_cols)
-fig_err, axes_err = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
-for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
-    for N in RESOLUTIONS:
-        u0 = test_functions[N][name]
-        n_steps_err = n_steps_of(error_growth_time, u0)
-        errs_pur, _, ts = error_growth(u0, n_steps_err)
-        errs_pur = errs_pur[:, 0]                  # rho
-        t_n = jnp.cumsum(ts)
-        ax.plot(t_n, errs_pur, linewidth=1.5, label=f"N={N}")
-        print(f"[{name}] N={N} ‖ε‖_L2 : t={float(t_n[0]):g} → {float(errs_pur[0]):.3e}   "
-              f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")
-    ax.set_title(name)
-    ax.set_xlabel("t_n = somme des T_k")
-    ax.set_ylabel("‖rho_n − rho_n(vrai)‖_L2")
-    ax.set_yscale("log")
-    ax.grid(True, alpha=0.3, which="both")
-    ax.legend()
-for ax in list(axes_err.flat)[len(FUNCTION_NAMES):]:
-    ax.axis("off")
-fig_err.suptitle(f"Croissance de l'erreur du modèle à lambda={LAMBDA:g} fixé")
-fig_err.tight_layout()
-fig_err.savefig("error_growth.png", dpi=150)
-print("Figure sauvegardée : error_growth.png")
+# print_band_table("Erreur par bande de fréquence")
 
-plt.show()
+# # ------------------------------------------------------------------
+# # Croissance de l'erreur ‖rho_n − rho_n(vrai)‖_L2 en fonction du temps physique
+# # t_n = somme des T_k : un panneau par fonction test, une courbe par résolution.
+# # Si l'invariance tient, les courbes se superposent (à nombre de pas
+# # double/quadruple près pour atteindre le même t, cf. doc §8).
+# # ------------------------------------------------------------------
+# # None -> temps physique max des figures de prédiction (max(PHYSICAL_TIMES))
+# ERROR_GROWTH_TIME = None
+# error_growth_time = ERROR_GROWTH_TIME if ERROR_GROWTH_TIME is not None else max(PHYSICAL_TIMES)
+
+# n_cols = 3
+# n_rows = -(-len(FUNCTION_NAMES) // n_cols)
+# fig_err, axes_err = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
+# for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
+#     for N in RESOLUTIONS:
+#         u0 = test_functions[N][name]
+#         n_steps_err = n_steps_of(error_growth_time, u0)
+#         errs_pur, _, ts = error_growth(u0, n_steps_err)
+#         errs_pur = errs_pur[:, 0]                  # rho
+#         t_n = jnp.cumsum(ts)
+#         ax.plot(t_n, errs_pur, linewidth=1.5, label=f"N={N}")
+#         print(f"[{name}] N={N} ‖ε‖_L2 : t={float(t_n[0]):g} → {float(errs_pur[0]):.3e}   "
+#               f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")
+#     ax.set_title(name)
+#     ax.set_xlabel("t_n = somme des T_k")
+#     ax.set_ylabel("‖rho_n − rho_n(vrai)‖_L2")
+#     ax.set_yscale("log")
+#     ax.grid(True, alpha=0.3, which="both")
+#     ax.legend()
+# for ax in list(axes_err.flat)[len(FUNCTION_NAMES):]:
+#     ax.axis("off")
+# fig_err.suptitle(f"Croissance de l'erreur du modèle à lambda={LAMBDA:g} fixé")
+# fig_err.tight_layout()
+# fig_err.savefig("error_growth.png", dpi=150)
+# print("Figure sauvegardée : error_growth.png")
+
+# plt.show()
