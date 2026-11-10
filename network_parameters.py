@@ -54,7 +54,8 @@ ONPOLICY_DEPTHS_PER_TRAJ = 4      # nb de profondeurs piochées par trajectoire 
                                    # sont déj�|  calculés pour rien de plus, autant en garder
                                    # plusieurs -> ONPOLICY_TRAJ * ONPOLICY_DEPTHS_PER_TRAJ paires/epoch)
 ONPOLICY_REGEN_EVERY   = 1        # régénère les paires on-policy tous les N epochs
-EPS_ADMISSIBLE         = 0.1      # état on-policy gardé si rho > EPS * min(rho_IC) et p > EPS * min(p_IC) partout
+EPS_ADMISSIBLE         = 1e-2     # état on-policy gardé si rho > EPS et p > EPS partout (seuil absolu : une double
+                                   # détente exacte peut descendre sous le min de la CI, pas de principe du minimum)
 
 # ------------------------------------------------------------------
 # METTRE A True A CHAQUE CHANGEMENT DE STAGE (MULTIPLE_STEPS, lambda_hf, K, etc.)
