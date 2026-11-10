@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model, stencil_conv1D
-from network_parameters import a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, lambda_pos, EPS_POS, LAMBDA, P, Q
+from network_parameters import a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, lambda_pos, EPS_POS, PHYS_NORM, LAMBDA, P, Q
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -104,10 +104,17 @@ def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
     u_pred = u0s_batch - LAMBDA * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
-    erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=-1) + 1e-12)  # (batch, 3)
-    # norme moyenne sur le batch, par variable : E ne domine pas rho, et rho*u peut être nul sur une trajectoire
+    # norme L2 moyenne sur le batch, par variable : E ne domine pas rho, et rho*u peut être nul sur une trajectoire.
+    # Sert aussi à loss_hf, quelle que soit PHYS_NORM (sinon l'échelle de loss_hf change d'un facteur ~sqrt(n))
     norme  = jnp.mean(jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=-1) + 1e-12), axis=0, keepdims=True)  # (1, 3)
-    loss_phys = jnp.mean(erreur / norme)
+    if PHYS_NORM == "L1":
+        # L1 relative : régression vers la médiane, un choc décalé d'une cellule pèse moins -> moins d'étalement
+        erreur   = jnp.sum(jnp.abs(erreur_vec), axis=-1)                                              # (batch, 3)
+        norme_l1 = jnp.mean(jnp.sum(jnp.abs(u_finals_batch), axis=-1), axis=0, keepdims=True) + 1e-12  # (1, 3)
+        loss_phys = jnp.mean(erreur / norme_l1)
+    else:
+        erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=-1) + 1e-12)  # (batch, 3)
+        loss_phys = jnp.mean(erreur / norme)
 
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
     e_hf    = e_hat[..., k0:Ktot]
