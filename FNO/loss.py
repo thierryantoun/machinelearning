@@ -44,18 +44,6 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
  
  
-# def _loss_lgno(params, u0s_batch, u_finals_batch):
-#     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-#     u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
-#     erreur = u_pred - u_finals_batch
-#     loss_phys = jnp.mean(jnp.sum(jnp.abs(erreur), axis=1) / n)
- 
-#     e_hat   = jnp.fft.rfft(erreur, axis=-1)
-#     e_hf    = e_hat[:, k0:k1_lgno]
-#     loss_hf = 1 / (k1_lgno - k0) * jnp.mean(jnp.sum(jnp.abs(e_hf) ** 2, axis=-1))
- 
-#     loss = loss_phys + lambda_hf * loss_hf
-#     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
 
 
 

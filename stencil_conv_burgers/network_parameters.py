@@ -1,15 +1,9 @@
-import argparse
 
 import jax.numpy as jnp
 
 from stencil import stencil_size
 
-_parser = argparse.ArgumentParser()
-_parser.add_argument("--model", choices=["fno", "lgno"], default="fno",
-                      help="Modèle �|  utiliser : fno ou lgno")
-_args, _ = _parser.parse_known_args()
-
-MODEL = _args.model
+MODEL = "stencil_conv1D"
 
 SOLVER = "burgers"   # "advection" ou "burgers"
 

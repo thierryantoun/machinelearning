@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from network_parameters import P, Q
 
 
-class FNOBlock(nn.Module):
+class stencil_conv1D_block(nn.Module):
     width: int
     activation: callable
 
@@ -15,7 +15,7 @@ class FNOBlock(nn.Module):
         return self.activation(self.W(v))
 
 
-class FNO1D(nn.Module):
+class stencil_conv1D(nn.Module):
     activation: callable
     dv: int
     n_blocks: int = 4
@@ -26,7 +26,7 @@ class FNO1D(nn.Module):
         # lifting : conv de noyau p+q+1, 1 canal -> dv canaux
         self.lifting = nn.Conv(features=self.dv, kernel_size=(self.p + self.q + 1,), padding="VALID", use_bias=True)
         self.blocks = [
-            FNOBlock(width=self.dv, activation=self.activation)
+            stencil_conv1D_block(width=self.dv, activation=self.activation)
             for _ in range(self.n_blocks)
         ]
         self.projection = nn.Dense(features=1, use_bias=True)
@@ -50,4 +50,4 @@ class FNO1D(nn.Module):
         return self._head(c[:, None] * jnp.sum(kernel, axis=(0, 1)) + bias)
 
 
-model = FNO1D(activation=nn.gelu, dv=64)
+model = stencil_conv1D(activation=nn.gelu, dv=64)

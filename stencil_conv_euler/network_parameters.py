@@ -1,14 +1,8 @@
-import argparse
 import math
 
 import jax.numpy as jnp
 
-_parser = argparse.ArgumentParser()
-_parser.add_argument("--model", choices=["stencil_conv1D", "lgno"], default="stencil_conv1D",
-                      help="Modèle �|  utiliser : stencil_conv1D ou lgno")
-_args, _ = _parser.parse_known_args()
-
-MODEL = _args.model
+MODEL = "stencil_conv1D"
 
 SOLVER = "euler"   
 

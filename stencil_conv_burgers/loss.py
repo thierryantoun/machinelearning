@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import optax
-from network import model, FNO1D
+from network import model, stencil_conv1D
 from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, T_target, P, Q
 
 if SOLVER == "advection":
@@ -17,7 +17,7 @@ def predict_F(params, u0):
     S     = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
     wb    = (S[P + Q + 1:] - S[:u0.shape[-1]]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
     N     = model.apply(params, u0)                   # (n,) convolution sur u0
-    N_bar = model.apply(params, wb, method=FNO1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
+    N_bar = model.apply(params, wb, method=stencil_conv1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
     if SOLVER == "advection":
         consistance = a * wb
     else:

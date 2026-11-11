@@ -284,6 +284,10 @@ N_epoch = N_TRAIN
 n_batches_epoch = n_batches
 u0s_onpolicy = None   # dernières paires on-policy générées, pour le diagnostic
 
+# losses toutes les 10 epochs, écrasé à chaque training (colonnes séparées par des tabulations, pour tracer)
+LOSS_LOG_PATH = "losses.txt"
+loss_log = open(LOSS_LOG_PATH, "w")
+
 for epoch in range(start_epoch, nb_epoch):
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
@@ -324,6 +328,10 @@ for epoch in range(start_epoch, nb_epoch):
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
               f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker}")
+        if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
+            loss_log.write("\t".join(["epoch"] + [f"train_{k}" for k in metrics_train] + [f"val_{k}" for k in metrics_val]) + "\n")
+        loss_log.write("\t".join([str(epoch)] + [f"{float(v):.8e}" for v in [*metrics_train.values(), *metrics_val.values()]]) + "\n")
+        loss_log.flush()           # lisible pendant le training
 
         if u0s_onpolicy is not None:
             # loss sur les états produits par le réseau lui-même : c'est là que l'on-policy doit agir
@@ -366,6 +374,9 @@ for epoch in range(start_epoch, nb_epoch):
         if epochs_no_improve >= PATIENCE:
             print(f"Early stopping à l'epoch {epoch} (pas d'amélioration depuis {PATIENCE} epochs). Meilleure val: {best_val:.6f}")
             break
+
+loss_log.close()
+print(f"Losses écrites dans {LOSS_LOG_PATH}")
 
 with open(PARAMS_PATH, "wb") as f:
     pickle.dump(best_params, f)
