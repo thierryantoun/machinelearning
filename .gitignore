@@ -1,0 +1,10 @@
+# cache Python
+__pycache__/
+*.pyc
+
+# sorties d'entraînement et de tests (poids, checkpoints, figures, films)
+*.pkl
+*.png
+*.mp4
+RESULTATS/
+pkl/
