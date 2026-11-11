@@ -29,6 +29,7 @@ nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size
 
 lambda_hf   = 1.0
+PHYS_NORM   = "L1"  # norme de loss_phys : "L1" (sum|e| / sum|cible|, chocs moins étalés) ou "L2" (||e||_2 / ||cible||_2)
 lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
 
 # ------------------------------------------------------------------
