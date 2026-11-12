@@ -21,6 +21,7 @@ class stencil_conv1D(nn.Module):
     n_blocks: int = 4
     p: int = P   # points à gauche du point central
     q: int = Q   # points à droite
+    lift_activation: bool = True   # False : anciens .pkl entraînés sans activation après le lifting
 
     def setup(self):
         # lifting : conv de noyau p+q+1, 1 canal -> dv canaux
@@ -35,7 +36,8 @@ class stencil_conv1D(nn.Module):
     # activation d'abord : sans elle, lifting puis blocks_0.W (linéaires) se composeraient en une seule matrice.
     # Ici dans _head, commun à __call__ et constant, pour que N - N_bar reste nul sur une fenêtre constante
     def _head(self, x):
-        x = self.activation(x)
+        if self.lift_activation:
+            x = self.activation(x)
         for block in self.blocks:
             x = block(x)
         return self.projection(x)[..., 0]
