@@ -13,7 +13,7 @@ N_TRAJ         = 10000  # nombre de trajectoires longues
 MULTIPLE_STEPS = 200  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
-T          = 5     # temps physique final des rollouts à pas CFL adaptatif (test.py)
+T          = 0.1     # temps physique final des rollouts à pas CFL adaptatif (test.py)
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
@@ -27,6 +27,8 @@ P, Q       = stencil_size(A_MIN, A_MAX, T_target * n)
 batch_size = min(64, N_TRAIN)   # borné pour les petits tests (N_TRAIN < 64)
 nb_epoch   = 500
 n_batches  = N_TRAIN // batch_size
+
+CONSISTANCE = False  # True : F = f(wb) + N[w] - N[wb] (consistance forcée) ; False : F = N[w] appris directement
 
 lambda_hf   = 1.0
 PHYS_NORM   = "L1"  # norme de loss_phys : "L1" (sum|e| / sum|cible|, chocs moins étalés) ou "L2" (||e||_2 / ||cible||_2)
