@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model, stencil_conv1D
-from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, PHYS_NORM, T_target, P, Q, CONSISTANCE
+from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, PHYS_NORM, T_target, P, Q
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -14,9 +14,7 @@ dx = x[1] - x[0]
 # F_{j+1/2} = f(wb_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
 # fenêtre j constante -> w_j = w_bar_j -> F = f(wb_j), quels que soient les poids
 def predict_F(params, u0):
-    if not CONSISTANCE:
-        return model.apply(params, u0)            # (n,) flux appris directement, sans consistance forcée
-    S     =jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
+    S     = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
     wb    = (S[P + Q + 1:] - S[:u0.shape[-1]]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
     N     = model.apply(params, u0)                   # (n,) convolution sur u0
     N_bar = model.apply(params, wb, method=stencil_conv1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
