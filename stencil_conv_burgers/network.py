@@ -32,7 +32,10 @@ class stencil_conv1D(nn.Module):
         self.projection = nn.Dense(features=1, use_bias=True)
 
     # couches ponctuelles après le lifting : (n, dv) -> (n,)
+    # activation d'abord : sans elle, lifting puis blocks_0.W (linéaires) se composeraient en une seule matrice.
+    # Ici dans _head, commun à __call__ et constant, pour que N - N_bar reste nul sur une fenêtre constante
     def _head(self, x):
+        x = self.activation(x)
         for block in self.blocks:
             x = block(x)
         return self.projection(x)[..., 0]
@@ -50,4 +53,4 @@ class stencil_conv1D(nn.Module):
         return self._head(c[:, None] * jnp.sum(kernel, axis=(0, 1)) + bias)
 
 
-model = stencil_conv1D(activation=nn.gelu, dv=64)
+model = stencil_conv1D(activation=nn.gelu, dv=160)

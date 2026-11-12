@@ -1,5 +1,7 @@
 import os
-os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
+# autotuning XLA réactivé (niveau par défaut) : avec le niveau 0, cuDNN prend un algorithme de conv
+# par défaut, potentiellement bien plus lent ; remettre la ligne ci-dessous si la compilation pose problème
+# os.environ["XLA_FLAGS"] = "--xla_gpu_autotune_level=0"
 from functools import partial
 
 import jax
