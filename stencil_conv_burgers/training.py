@@ -144,28 +144,26 @@ print(f"dx = {dx:.6f}")
 print(f"T_target/dx (facteur d'amplification, fixe) : {T_target/dx:.2f}")
 
 # optimiseur
-schedule = optax.warmup_cosine_decay_schedule(
-    init_value=0.0,
-    peak_value=1e-4,
-    warmup_steps=5 * n_batches,
-    decay_steps=nb_epoch * n_batches,
-    end_value=1e-6,
+# LR piloté depuis Python : warmup linéaire puis reduce-on-plateau sur la val loss.
+# inject_hyperparams met le LR dans opt_state -> on le change entre deux epochs sans recompiler run_epoch.
+PEAK_LR       = 5e-4
+WARMUP_EPOCHS = 5
+LR_PATIENCE   = 20     # epochs sans amélioration de la val avant de baisser le LR (multiple de 10 : éval toutes les 10 epochs)
+LR_FACTOR     = 0.5
+MIN_LR        = 1e-6   # arrêt du training quand le LR passe sous ce seuil
+RESUME_LR     = None   # LR imposé à la reprise ; None = reprendre le LR du checkpoint
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),
+    optax.inject_hyperparams(optax.adam)(learning_rate=PEAK_LR),
 )
-
-RESUME_LR    = None   # LR fixe à la reprise ; None = continuer le cosine schedule
-WEIGHT_DECAY = None
-
-if RESUME_LR is not None and os.path.exists(CHECKPOINT_PATH):
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(learning_rate=RESUME_LR, weight_decay=WEIGHT_DECAY)
-    )
-else:
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(learning_rate=schedule, weight_decay=WEIGHT_DECAY)
-    )
 train_step = make_train_step(optimizer)
+
+
+def set_lr(opt_state, lr):
+    "Écrit le LR dans l'état de inject_hyperparams (2e élément du chain)."
+    opt_state[1].hyperparams["learning_rate"] = jnp.asarray(lr, dtype=jnp.float32)
+    return opt_state
 
 
 @partial(jax.jit, static_argnames=("n_batches_epoch",))
@@ -189,8 +187,6 @@ def run_epoch(params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoc
     return params, opt_state
 
 
-PATIENCE = 50
-
 
 def eval_losses(params, u0s, u_finals, n_batches_eval):
     "Moyenne des métriques de loss_fn (dict aux) sur n_batches_eval batches."
@@ -210,11 +206,14 @@ if os.path.exists(CHECKPOINT_PATH):
         ckpt = pickle.load(f)
     params        = ckpt["params"]
 
-    try:
+    # opt_state absent ou de structure différente (anciens checkpoints adamw + cosine) -> reprise à froid
+    opt_state = optimizer.init(params)
+    if jax.tree_util.tree_structure(ckpt.get("opt_state")) == jax.tree_util.tree_structure(opt_state):
         opt_state = ckpt["opt_state"]
-    except KeyError:
-        print("⚠️  Pas d'opt_state dans le checkpoint, réinitialisation (reprise à froid).")
-        opt_state = optimizer.init(params)
+    else:
+        print("⚠️  opt_state absent ou incompatible avec l'optimiseur actuel, réinitialisation (reprise à froid).")
+
+    lr_current = ckpt.get("lr_current", PEAK_LR) if RESUME_LR is None else RESUME_LR
 
     start_epoch   = ckpt["epoch"] + 1
     losses_training   = ckpt["losses_training"]
@@ -238,6 +237,7 @@ else:
     best_val = float("inf")
     best_params = params
     epochs_no_improve = 0
+    lr_current = PEAK_LR
     loss0, _ = loss_fn(params, u0s_training[:batch_size], u_finals_training[:batch_size])
     print(f"[init] loss={loss0:.6f}")
 
@@ -265,6 +265,10 @@ for epoch in range(start_epoch, nb_epoch):
         N_epoch         = u0s_epoch.shape[0]
         n_batches_epoch = max(1, N_epoch // batch_size)
 
+    # warmup linéaire par epoch, puis le LR courant (modifié par le plateau plus bas)
+    lr_epoch = PEAK_LR * (epoch + 1) / WARMUP_EPOCHS if epoch < WARMUP_EPOCHS else lr_current
+    opt_state = set_lr(opt_state, lr_epoch)
+
     key_train, subkey = random.split(key_train)
     perm = random.permutation(subkey, N_epoch)
     params, opt_state = run_epoch(
@@ -286,14 +290,23 @@ for epoch in range(start_epoch, nb_epoch):
         else:
             epochs_no_improve += 10
 
+        # reduce-on-plateau (après le warmup) : epochs_no_improve compte depuis la dernière amélioration ou baisse du LR
+        lr_dropped = False
+        if epoch >= WARMUP_EPOCHS and epochs_no_improve >= LR_PATIENCE:
+            lr_current *= LR_FACTOR
+            epochs_no_improve = 0
+            lr_dropped = True
+
         detail_train = " ".join(f"{k}={v:.6f}" for k, v in metrics_train.items() if k != "loss")
         detail_val   = " ".join(f"{k}={v:.6f}" for k, v in metrics_val.items() if k != "loss")
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
-              f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker}")
+              f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker} | lr={lr_epoch:.2e}")
+        if lr_dropped:
+            print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
         if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
-            loss_log.write("\t".join(["epoch"] + [f"train_{k}" for k in metrics_train] + [f"val_{k}" for k in metrics_val]) + "\n")
-        loss_log.write("\t".join([str(epoch)] + [f"{float(v):.8e}" for v in [*metrics_train.values(), *metrics_val.values()]]) + "\n")
+            loss_log.write("\t".join(["epoch"] + [f"train_{k}" for k in metrics_train] + [f"val_{k}" for k in metrics_val] + ["lr"]) + "\n")
+        loss_log.write("\t".join([str(epoch)] + [f"{float(v):.8e}" for v in [*metrics_train.values(), *metrics_val.values(), lr_epoch]]) + "\n")
         loss_log.flush()           # lisible pendant le training
         losses_training.append(float(loss_train))
         losses_validation.append(float(loss_val))
@@ -309,14 +322,15 @@ for epoch in range(start_epoch, nb_epoch):
                     "best_val": best_val,
                     "best_params": best_params,
                     "epochs_no_improve": epochs_no_improve,
+                    "lr_current": lr_current,
                 }, f)
             print(f"  → Checkpoint sauvegardé (epoch {epoch})")
 
         if jnp.isnan(loss_train):
             print(f"NaN détecté à l'epoch {epoch}, arrêt.")
             break
-        if epochs_no_improve >= PATIENCE:
-            print(f"Early stopping à l'epoch {epoch} (pas d'amélioration depuis {PATIENCE} epochs). Meilleure val: {best_val:.6f}")
+        if lr_current < MIN_LR:
+            print(f"Arrêt à l'epoch {epoch} : LR {lr_current:.2e} < MIN_LR {MIN_LR:.0e}. Meilleure val: {best_val:.6f}")
             break
 
 loss_log.close()
