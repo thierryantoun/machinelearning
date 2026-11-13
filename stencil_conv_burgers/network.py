@@ -55,4 +55,4 @@ class stencil_conv1D(nn.Module):
         return self._head(c[:, None] * jnp.sum(kernel, axis=(0, 1)) + bias)
 
 
-model = stencil_conv1D(activation=nn.gelu, dv=160)
+model = stencil_conv1D(activation=nn.gelu, dv=200, n_blocks=4)
