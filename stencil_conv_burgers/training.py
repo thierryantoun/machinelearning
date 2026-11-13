@@ -153,7 +153,7 @@ schedule = optax.warmup_cosine_decay_schedule(
 )
 
 RESUME_LR    = None   # LR fixe à la reprise ; None = continuer le cosine schedule
-WEIGHT_DECAY = 1e-3
+WEIGHT_DECAY = None
 
 if RESUME_LR is not None and os.path.exists(CHECKPOINT_PATH):
     optimizer = optax.chain(
