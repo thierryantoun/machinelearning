@@ -18,6 +18,10 @@ def flux(u_L, u_R):
 @jax.jit
 def burgers_solver(u, T_target):
     dx = 1.0 / u.shape[-1]   # domaine périodique [0, 1) : vaut x[1]-x[0] à n=256, suit la grille sinon
+    # dt figé sur le bloc, calculé sur max|u| au début : max|u| ne fait que décroître (CFL toujours
+    # respectée). Recalculé à chaque sous-pas, il dépendrait du max GLOBAL de u(t) : la diffusion
+    # numérique au centre dépendrait alors de ce qui se passe loin de la fenêtre du réseau.
+    dt_cfl = cfl * dx / (jnp.max(jnp.abs(u)) + 1e-10)
 
     def cond_fn(carry):
         u, t, F = carry
@@ -25,7 +29,6 @@ def burgers_solver(u, T_target):
 
     def body_fn(carry):
         u, t, F = carry
-        dt_cfl = cfl * dx / (jnp.max(jnp.abs(u)) + 1e-10)
         dt_step = jnp.minimum(dt_cfl, T_target - t)  # ne jamais depasser T_target
         f_face = flux(u, jnp.roll(u, -1))
         u_new = u - dt_step / dx * (f_face - jnp.roll(f_face, 1))
