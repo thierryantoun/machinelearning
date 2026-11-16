@@ -149,21 +149,14 @@ print(f"dx = {dx:.6f}")
 print(f"T_target/dx (facteur d'amplification, fixe) : {T_target/dx:.2f}")
 
 # optimiseur
-# LR piloté depuis Python, par epoch : warmup linéaire jusqu'à PEAK_LR, puis cosine decay de PEAK_LR
-# à END_LR sur le reste des nb_epoch epochs du stage. inject_hyperparams met le LR dans opt_state ->
-# on le change entre deux epochs sans recompiler run_epoch. Un nouveau stage (NEW_STAGE) relance warmup + cosine.
+# LR piloté depuis Python : warmup linéaire puis reduce-on-plateau sur la val loss.
+# inject_hyperparams met le LR dans opt_state -> on le change entre deux epochs sans recompiler run_epoch.
 PEAK_LR       = 5e-4
-END_LR        = 1e-6
 WARMUP_EPOCHS = 5
-
-
-def lr_schedule(epoch, stage_start):
-    "Warmup linéaire sur WARMUP_EPOCHS, puis cosine de PEAK_LR à END_LR à la dernière epoch du stage."
-    e = epoch - stage_start
-    if e < WARMUP_EPOCHS:
-        return PEAK_LR * (e + 1) / WARMUP_EPOCHS
-    progress = min(1.0, (e - WARMUP_EPOCHS) / max(1, nb_epoch - WARMUP_EPOCHS - 1))
-    return END_LR + (PEAK_LR - END_LR) * 0.5 * (1 + math.cos(math.pi * progress))
+LR_PATIENCE   = 20     # epochs sans amélioration de la val avant de baisser le LR (multiple de 10 : éval toutes les 10 epochs)
+LR_FACTOR     = 0.5
+MIN_LR        = 1e-6   # arrêt du training quand le LR passe sous ce seuil
+RESUME_LR     = None   # LR d'un nouveau stage (NEW_STAGE) ; None = PEAK_LR
 
 optimizer = optax.chain(
     optax.clip_by_global_norm(1.0),
@@ -225,23 +218,23 @@ if os.path.exists(CHECKPOINT_PATH):
     else:
         print("⚠️  opt_state absent ou incompatible avec l'optimiseur actuel, réinitialisation (reprise à froid).")
 
+    lr_current = ckpt.get("lr_current", PEAK_LR)   # reprise simple : on garde le LR courant
+
     start_epoch   = ckpt["epoch"] + 1
-    stage_start   = ckpt.get("stage_start", 0)   # reprise simple : on continue le cosine du stage en cours
     losses_training   = ckpt["losses_training"]
     losses_validation = ckpt["losses_validation"]
     best_params   = ckpt["best_params"]
 
     if NEW_STAGE:
-        # nouveau stage (ex. autres données) : on repart des meilleurs poids, avec un nouveau
-        # warmup + cosine et un Adam réinitialisé, ses moments venant de l'ancienne distribution
+        # nouveau stage (ex. autres données) : on repart des meilleurs poids, avec un LR neuf (warmup
+        # compris) et un Adam réinitialisé, ses moments venant de l'ancienne distribution
         params            = best_params
         opt_state         = optimizer.init(params)
-        stage_start       = start_epoch
+        lr_current        = RESUME_LR if RESUME_LR is not None else PEAK_LR
         best_val          = float("inf")
         epochs_no_improve = 0
         print(f"Reprise depuis l'epoch {start_epoch} — NOUVEAU STAGE : meilleurs poids, Adam réinitialisé, "
-              f"warmup + cosine {PEAK_LR:.0e} → {END_LR:.0e} sur {nb_epoch} epochs ; "
-              f"best_val réinitialisé (ancien : {ckpt['best_val']:.6f})")
+              f"LR → {lr_current:.2e} après warmup ; best_val réinitialisé (ancien : {ckpt['best_val']:.6f})")
     else:
         best_val          = ckpt["best_val"]
         epochs_no_improve = ckpt["epochs_no_improve"]
@@ -254,7 +247,7 @@ else:
     best_val = float("inf")
     best_params = params
     epochs_no_improve = 0
-    stage_start = 0
+    lr_current = PEAK_LR
     loss0, _ = loss_fn(params, u0s_training[:batch_size], u_finals_training[:batch_size])
     print(f"[init] loss={loss0:.6f}")
 
@@ -281,12 +274,15 @@ def save_checkpoint(epoch):
             "best_val": best_val,
             "best_params": best_params,
             "epochs_no_improve": epochs_no_improve,
-            "stage_start": stage_start,
+            "lr_current": lr_current,
         }, f)
     print(f"  → Checkpoint sauvegardé (epoch {epoch})")
 
 
-for epoch in range(start_epoch, stage_start + nb_epoch):   # le stage dure nb_epoch epochs (fin du cosine)
+# warmup au début d'un entraînement neuf ou d'un nouveau stage ; pas de warmup pour une simple reprise
+warmup_start = start_epoch if (start_epoch == 0 or NEW_STAGE) else None
+
+for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond pour CE run
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
         u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy = generate_onpolicy_pairs(key_onpolicy, params)
@@ -298,7 +294,9 @@ for epoch in range(start_epoch, stage_start + nb_epoch):   # le stage dure nb_ep
         N_epoch         = u0s_epoch.shape[0]
         n_batches_epoch = max(1, N_epoch // batch_size)
 
-    lr_epoch = lr_schedule(epoch, stage_start)   # warmup puis cosine
+    # warmup linéaire par epoch, puis le LR courant (modifié par le plateau plus bas)
+    in_warmup = warmup_start is not None and epoch - warmup_start < WARMUP_EPOCHS
+    lr_epoch = lr_current * (epoch - warmup_start + 1) / WARMUP_EPOCHS if in_warmup else lr_current
     opt_state = set_lr(opt_state, lr_epoch)
 
     key_train, subkey = random.split(key_train)
@@ -322,11 +320,20 @@ for epoch in range(start_epoch, stage_start + nb_epoch):   # le stage dure nb_ep
         else:
             epochs_no_improve += 10
 
+        # reduce-on-plateau (après le warmup) : epochs_no_improve compte depuis la dernière amélioration ou baisse du LR
+        lr_dropped = False
+        if not in_warmup and epochs_no_improve >= LR_PATIENCE:
+            lr_current *= LR_FACTOR
+            epochs_no_improve = 0
+            lr_dropped = True
+
         detail_train = " ".join(f"{k}={v:.6f}" for k, v in metrics_train.items() if k != "loss")
         detail_val   = " ".join(f"{k}={v:.6f}" for k, v in metrics_val.items() if k != "loss")
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
               f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker} | lr={lr_epoch:.2e}")
+        if lr_dropped:
+            print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
         if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
             loss_log.write("\t".join(["epoch"] + [f"train_{k}" for k in metrics_train] + [f"val_{k}" for k in metrics_val] + ["lr"]) + "\n")
         loss_log.write("\t".join([str(epoch)] + [f"{float(v):.8e}" for v in [*metrics_train.values(), *metrics_val.values(), lr_epoch]]) + "\n")
@@ -339,6 +346,9 @@ for epoch in range(start_epoch, stage_start + nb_epoch):   # le stage dure nb_ep
 
         if jnp.isnan(loss_train):
             print(f"NaN détecté à l'epoch {epoch}, arrêt.")
+            break
+        if lr_current < MIN_LR:
+            print(f"Arrêt à l'epoch {epoch} : LR {lr_current:.2e} < MIN_LR {MIN_LR:.0e}. Meilleure val: {best_val:.6f}")
             break
 
 save_checkpoint(epoch)   # état final : un stage suivant (NEW_STAGE) repart des derniers best_params
