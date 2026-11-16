@@ -25,7 +25,7 @@ T_target   = 0.1               # lambda = T_target * n = 25.6 à n=256
 A_MIN, A_MAX = -1.0, 1.0
 P, Q       = stencil_size(A_MIN, A_MAX, T_target * n)
 batch_size = 128   # borné pour les petits tests (N_TRAIN < 64)
-nb_epoch   = 710   # plafond de sécurité : l'arrêt normal vient de MIN_LR (reduce-on-plateau, training.py)
+nb_epoch   = 710   # plafond de sécurité par run (compté depuis l'epoch de reprise) : l'arrêt normal vient de MIN_LR (training.py)
 n_batches  = N_TRAIN // batch_size
 
 lambda_hf   = 1.0

@@ -16,7 +16,7 @@ from network_parameters import (
 )
 from initial_data import generate_initial_data
 from stencil import stencil_size
-from loss import model, loss_fn, make_train_step, predict_F
+from loss import model, loss_fn, make_train_step, predict_F, V_max, bloc
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -44,7 +44,7 @@ N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
 # calcul stencil max sur tout le jeu de données pour savoir quelles valeurs prendre pour p et q
 # vitesses caractéristiques f'(u) : advection -> a constant, burgers -> u
 # les champs constants sont ignorés : rien ne s'y propage, et la consistance locale
-# donne déjà F = f(c) exactement (make_constante va jusqu'à |u| = 5, non renormalisé)
+# donne déjà F = f(c) exactement (paires normalisées par V dans generate_trajectory : bornes attendues [-1, 1])
 def wave_speed_bounds(*datasets):
     if SOLVER == "advection":
         return a, a
@@ -54,20 +54,23 @@ def wave_speed_bounds(*datasets):
     return float(jnp.min(u)), float(jnp.max(u))
 
 def generate_trajectory(key):
-    "Trajectoire de MULTIPLE_STEPS blocs, chacun integre sur le meme temps physique T_target."
+    """Trajectoire de MULTIPLE_STEPS blocs à lambda fixé : le bloc k dure T_target / V(u_k).
+    Paires stockées normalisées par le V de l'entrée (max|entrée| = 1) ; la trajectoire continue
+    sur les vraies valeurs. ts = t * V, temps normalisé, doit valoir T_target."""
     u0 = generate_initial_data(key)
 
     def run_chunk(u, _):
-        u_next, _, t = _solver(u, T_target)
-        return u_next, (u, u_next, t)
+        V = V_max(u)
+        u_next, _, t = _solver(u, T_target / V)
+        return u_next, (u / V, u_next / V, t * V)
 
     _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
     return u0s, u_finals, ts
 
 
 def model_step(params, u):
-    F = predict_F(params, u)
-    return u - (T_target / dx) * (F - jnp.roll(F, 1, axis=-1))
+    "Un bloc adaptatif du réseau (loss.bloc), sans la durée."
+    return bloc(params, u)[0]
 
 
 EPS_MAXPRINCIPLE = 0.05   # tolérance de dépassement de [min u0, max u0]
@@ -101,6 +104,8 @@ def generate_onpolicy_pairs(key, params):
     gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps+1,n),(k,) -> (k,n)
     u0s_corrupted = jax.lax.stop_gradient(gather_traj(all_states, depths))  # (ONPOLICY_TRAJ, k, n)
     u0s_corrupted = u0s_corrupted.reshape(-1, u0s_corrupted.shape[-1])      # (ONPOLICY_TRAJ*k, n)
+    # même format que les paires de generate_trajectory : entrée normalisée (max| | = 1), bloc de T_target
+    u0s_corrupted = u0s_corrupted / jax.vmap(V_max)(u0s_corrupted)[:, None]
 
     def relabel(u):
         u_true_next, _, _ = _solver(u, T_target)
@@ -221,10 +226,15 @@ if os.path.exists(CHECKPOINT_PATH):
     best_params   = ckpt["best_params"]
 
     if NEW_STAGE:
+        # nouveau stage (ex. autres données) : on repart des meilleurs poids, avec un LR neuf (warmup
+        # compris) et un Adam réinitialisé, ses moments venant de l'ancienne distribution
+        params            = best_params
+        opt_state         = optimizer.init(params)
+        lr_current        = RESUME_LR if RESUME_LR is not None else PEAK_LR
         best_val          = float("inf")
         epochs_no_improve = 0
-        print(f"Reprise depuis l'epoch {start_epoch} — NOUVEAU STAGE : "
-              f"best_val et epochs_no_improve réinitialisés (ancien best_val: {ckpt['best_val']:.6f})")
+        print(f"Reprise depuis l'epoch {start_epoch} — NOUVEAU STAGE : meilleurs poids, Adam réinitialisé, "
+              f"LR → {lr_current:.2e} après warmup ; best_val réinitialisé (ancien : {ckpt['best_val']:.6f})")
     else:
         best_val          = ckpt["best_val"]
         epochs_no_improve = ckpt["epochs_no_improve"]
@@ -253,7 +263,26 @@ n_batches_epoch = n_batches
 LOSS_LOG_PATH = "losses.txt"
 loss_log = open(LOSS_LOG_PATH, "w")
 
-for epoch in range(start_epoch, nb_epoch):
+def save_checkpoint(epoch):
+    with open(CHECKPOINT_PATH, "wb") as f:
+        pickle.dump({
+            "epoch": epoch,
+            "params": params,
+            "opt_state": opt_state,
+            "losses_training": losses_training,
+            "losses_validation": losses_validation,
+            "best_val": best_val,
+            "best_params": best_params,
+            "epochs_no_improve": epochs_no_improve,
+            "lr_current": lr_current,
+        }, f)
+    print(f"  → Checkpoint sauvegardé (epoch {epoch})")
+
+
+# warmup au début d'un entraînement neuf ou d'un nouveau stage ; pas de warmup pour une simple reprise
+warmup_start = start_epoch if (start_epoch == 0 or NEW_STAGE) else None
+
+for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond pour CE run
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
         u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy = generate_onpolicy_pairs(key_onpolicy, params)
@@ -266,7 +295,8 @@ for epoch in range(start_epoch, nb_epoch):
         n_batches_epoch = max(1, N_epoch // batch_size)
 
     # warmup linéaire par epoch, puis le LR courant (modifié par le plateau plus bas)
-    lr_epoch = PEAK_LR * (epoch + 1) / WARMUP_EPOCHS if epoch < WARMUP_EPOCHS else lr_current
+    in_warmup = warmup_start is not None and epoch - warmup_start < WARMUP_EPOCHS
+    lr_epoch = lr_current * (epoch - warmup_start + 1) / WARMUP_EPOCHS if in_warmup else lr_current
     opt_state = set_lr(opt_state, lr_epoch)
 
     key_train, subkey = random.split(key_train)
@@ -292,7 +322,7 @@ for epoch in range(start_epoch, nb_epoch):
 
         # reduce-on-plateau (après le warmup) : epochs_no_improve compte depuis la dernière amélioration ou baisse du LR
         lr_dropped = False
-        if epoch >= WARMUP_EPOCHS and epochs_no_improve >= LR_PATIENCE:
+        if not in_warmup and epochs_no_improve >= LR_PATIENCE:
             lr_current *= LR_FACTOR
             epochs_no_improve = 0
             lr_dropped = True
@@ -312,19 +342,7 @@ for epoch in range(start_epoch, nb_epoch):
         losses_validation.append(float(loss_val))
 
         if epoch % 100 == 0:
-            with open(CHECKPOINT_PATH, "wb") as f:
-                pickle.dump({
-                    "epoch": epoch,
-                    "params": params,
-                    "opt_state": opt_state,
-                    "losses_training": losses_training,
-                    "losses_validation": losses_validation,
-                    "best_val": best_val,
-                    "best_params": best_params,
-                    "epochs_no_improve": epochs_no_improve,
-                    "lr_current": lr_current,
-                }, f)
-            print(f"  → Checkpoint sauvegardé (epoch {epoch})")
+            save_checkpoint(epoch)
 
         if jnp.isnan(loss_train):
             print(f"NaN détecté à l'epoch {epoch}, arrêt.")
@@ -333,6 +351,7 @@ for epoch in range(start_epoch, nb_epoch):
             print(f"Arrêt à l'epoch {epoch} : LR {lr_current:.2e} < MIN_LR {MIN_LR:.0e}. Meilleure val: {best_val:.6f}")
             break
 
+save_checkpoint(epoch)   # état final : un stage suivant (NEW_STAGE) repart des derniers best_params
 loss_log.close()
 print(f"Losses écrites dans {LOSS_LOG_PATH}")
 
