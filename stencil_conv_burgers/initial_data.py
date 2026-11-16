@@ -13,14 +13,26 @@ def make_sinus_u0(key):
     return u / jnp.max(jnp.abs(u))
 
 
-def generate_initial_data(key, nb_frequences=K, x=x):
+IC_NAMES = ["sinus", "gaussiennes", "polynomes", "constante", "rampe",
+            "marches", "creneau", "riemann", "sinus_hf", "champ_gaussien"]
+# Probabilités de tirage des types (même ordre que IC_NAMES) : p_i ∝ L_i, loss moyenne d'une
+# paire du type i (phys + hf) mesurée par loss_par_type.py sur params_stencil_conv1D.pkl.
+# constante a L = 0 (exacte par consistance du flux) -> jamais tirée.
+IC_PROBS = jnp.array([0.161, 0.054, 0.016, 0.000, 0.086,
+                      0.323, 0.071, 0.083, 0.083, 0.122])
+IC_PROBS = IC_PROBS / jnp.sum(IC_PROBS)   # arrondis -> somme exactement 1
+
+
+def generate_initial_data(key, nb_frequences=K, x=x, ic_type=None):
     key, subkey = random.split(key)
     # 0: sinus, 1: gaussiennes, 2: polynomes, 3: constante, 4: rampe,
     # 5: marches (constante par morceaux, discontinue), 6: creneau (pulse rectangulaire, discontinu)
     # 7: riemann (une seule discontinuite, deux niveaux aleatoires)
-    # 8: sinus_hf (sinus haute frequence k > K, sans choc pendant un bloc T_target)
+    # 8: sinus_hf (ondulation haute frequence k > K sur un fond lisse, sans choc de l'ondulation pendant un bloc)
     # 9: champ_gaussien (champ aléatoire gaussien, longueur de corrélation variée)
-    ic_type = random.randint(subkey, (), 0, 10)
+    # ic_type imposé (ex. loss_par_type.py) ou tiré selon IC_PROBS
+    if ic_type is None:
+        ic_type = random.choice(subkey, len(IC_NAMES), p=IC_PROBS)
 
     key, subkey = random.split(key)
 
