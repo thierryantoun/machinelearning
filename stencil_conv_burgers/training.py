@@ -61,9 +61,8 @@ def generate_trajectory(key):
 
     def run_chunk(u, _):
         V = V_max(u)
-        u_next, F, t = _solver(u, T_target / V)
-        # cible = flux moyen du bloc, normalisé : u = V w et f(u) = u^2/2 -> F_u = V^2 F_w
-        return u_next, (u / V, F / V**2, t * V)
+        u_next, _, t = _solver(u, T_target / V)
+        return u_next, (u / V, u_next / V, t * V)
 
     _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
     return u0s, u_finals, ts
@@ -109,8 +108,8 @@ def generate_onpolicy_pairs(key, params):
     u0s_corrupted = u0s_corrupted / jax.vmap(V_max)(u0s_corrupted)[:, None]
 
     def relabel(u):
-        _, F_true, _ = _solver(u, T_target)   # cible = flux moyen du bloc (loss sur le flux)
-        return F_true
+        u_true_next, _, _ = _solver(u, T_target)
+        return u_true_next
 
     u_finals_true = jax.vmap(relabel)(u0s_corrupted)
 
@@ -130,7 +129,8 @@ u_finals_validation = u_finals_traj_val.reshape(-1, x.shape[0])
 ts_validation       = ts_traj_val.reshape(-1)
 
 
-a_min, a_max = wave_speed_bounds(u0s_training, u0s_validation)   # cibles = flux, pas des vitesses
+a_min, a_max = wave_speed_bounds(u0s_training, u_finals_training,
+                                 u0s_validation, u_finals_validation)
 lam  = float(T_target / dx)
 p, q = stencil_size(a_min, a_max, lam)
 print(f"Vitesses : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={lam:.4f} "

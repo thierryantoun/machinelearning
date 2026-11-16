@@ -52,21 +52,20 @@ kappa     = 0.8
 k0        = int(kappa * Ktot)
 
 
-# Loss sur le FLUX (pas sur u) : cible = flux moyen du solveur de référence sur le bloc, F_{j+1/2}.
-# Sur u, l'erreur de flux est multipliée par lambda * 2|sin(pi k / n)| (jusqu'à ~51 au mode de Nyquist) :
-# la loss sur u pèse donc les fréquences de F de x3 à x50 (mauvais conditionnement). Ici toutes pèsent pareil.
-def _loss_fno(params, u0s_batch, F_refs_batch):
+def _loss_fno(params, u0s_batch, u_finals_batch):
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
+    u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
-    erreur_vec = F_pred - F_refs_batch
+    erreur_vec = u_pred - u_finals_batch
     if PHYS_NORM == "L1":
-        # L1 relative : normalisée par la moyenne sur le batch de sum|F_ref| (pas par échantillon : une cible proche de 0 n'explose pas)
+        # L1 relative (comme Euler) : régression vers la médiane, un choc décalé d'une cellule pèse moins -> moins d'étalement.
+        # Normalisée par la moyenne sur le batch de sum|cible| (pas par échantillon : une cible proche de 0 n'explose pas)
         erreur    = jnp.sum(jnp.abs(erreur_vec), axis=1)                          # (batch,)
-        norme_l1  = jnp.mean(jnp.sum(jnp.abs(F_refs_batch), axis=1)) + 1e-12      # scalaire
+        norme_l1  = jnp.mean(jnp.sum(jnp.abs(u_finals_batch), axis=1)) + 1e-12    # scalaire
         loss_phys = jnp.mean(erreur / norme_l1)
     else:
         erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=1) + 1e-12)
-        norme  = jnp.sqrt(jnp.sum(F_refs_batch ** 2, axis=1) + 1e-12)
+        norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
         loss_phys = jnp.mean(erreur / norme)
 
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
@@ -80,8 +79,8 @@ loss_fn = jax.jit(_loss_fno)
 
 def make_train_step(optimizer):
     @jax.jit
-    def train_step(params, opt_state, u0s_batch, F_refs_batch):
-        grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, F_refs_batch)
+    def train_step(params, opt_state, u0s_batch, u_finals_batch):
+        grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, new_opt_state
