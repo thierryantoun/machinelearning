@@ -9,8 +9,8 @@ SOLVER = "burgers"   # "advection" ou "burgers"
 
 K          = 40   # nombre de fréquences des conditions initiales (initial_data.py), sans lien avec le réseau
 
-N_TRAJ         = 10000  # nombre de trajectoires longues
-MULTIPLE_STEPS = 200  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
+N_TRAJ         = 150000  # nombre de trajectoires longues
+MULTIPLE_STEPS = 1  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
 T          = 0.1     # temps physique final des rollouts à pas CFL adaptatif (test.py)
