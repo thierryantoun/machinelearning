@@ -1,3 +1,4 @@
+import math
 import pickle
 import time
 from functools import partial
@@ -7,7 +8,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 from network_parameters import SOLVER, T_target, n, cfl, T
-from loss import predict_F
+from loss import predict_F, V_max
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _active_solver
@@ -54,15 +55,31 @@ def n_steps_of(t_phys, N):
     return max(1, round(t_phys / T_of(N)))
 
 
+def n_blocks_max(t_phys, N):
+    "Majorant du nombre de blocs adaptatifs pour atteindre t_phys (blocs >= T_N tant que max|u| <= 1)."
+    return max(1, math.ceil(t_phys / T_of(N) - 1e-9))
+
+
+def T_bloc(u):
+    "Durée d'un bloc adaptatif : T_N / V(u), V = max|u| (cf. loss.bloc)."
+    return T_of(u.shape[-1]) / V_max(u)
+
+
 def solver(u):
-    "Un bloc du vrai schéma, sur le temps T_N de la grille de u."
-    return _active_solver(u, T_of(u.shape[-1]))
+    "Un bloc du vrai schéma, sur la même durée T_bloc(u) qu'un bloc du modèle."
+    return _active_solver(u, T_bloc(u))
+
+
+def _step_raw(u):
+    "Pas brut du réseau à lambda fixé, sans normalisation : valable pour max|u| <= 1."
+    F = predict_F(params, u)
+    return u - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
 
 
 def step(u):
-    "Un bloc du modèle : u - lambda (F_{j+1/2} - F_{j-1/2}), lambda = T_N / dx identique sur toute grille."
-    F = predict_F(params, u)
-    return u - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
+    "Un bloc adaptatif du modèle : normalise par V, pas brut, remise à l'échelle ; dure T_bloc(u)."
+    V = V_max(u)
+    return V * _step_raw(u / V)
 
 
 def l2(v):
@@ -72,8 +89,8 @@ def l2(v):
 
 @partial(jax.jit, static_argnames=("n_steps",))
 def solver_rollout(u0, n_steps):
-    def solver_block(u, _):
-        return solver(u)[0], None
+    def solver_block(u, _):   # référence à blocs fixes T_N : arrive au temps physique n_steps * T_N
+        return _active_solver(u, T_of(u.shape[-1]))[0], None
     u_target, _ = jax.lax.scan(solver_block, u0, None, length=n_steps)
     return u_target
 
@@ -101,47 +118,62 @@ def model_rollout(u0, t_final=T):
     def body_fn(carry):
         u, t, n_blocks = carry
         alpha = jnp.maximum(jnp.max(jnp.abs(u)), T_N / (t_final - t))
-        u_next = alpha * step(u / alpha)          # normalise, bloc du modèle, remise à l'échelle
+        u_next = alpha * _step_raw(u / alpha)     # normalise, bloc du modèle, remise à l'échelle
         return u_next, t + T_N / alpha, n_blocks + 1
 
     u_pred, _, n_blocks = jax.lax.while_loop(cond_fn, body_fn, (u0, 0.0, 0))
     return u_pred, n_blocks
 
 
-@partial(jax.jit, static_argnames=("n_steps",))
-def error_growth(u0, n_steps):
-    """Croissance de l'erreur bloc par bloc.
+def _paired_block(u_model, u_true, t, t_final):
+    """Un bloc adaptatif commun : durée fixée par l'état du modèle (alpha comme model_rollout,
+    dernier bloc raccourci sur t_final), le solveur avance u_true de la même durée.
+    Une fois t_final atteint (à 1e-6 T_N près, arrondis float32), tout est figé : sinon alpha
+    exploserait et amplifierait le bruit d'arrondi du réseau sur u / alpha ~ 0."""
+    T_N = T_of(u_model.shape[-1])
+    done = t_final - t <= 1e-6 * T_N
+    alpha = jnp.maximum(V_max(u_model), T_N / jnp.maximum(t_final - t, 1e-6 * T_N))
+    T_k = jnp.where(done, 0.0, T_N / alpha)
+    u_model_new = jnp.where(done, u_model, alpha * _step_raw(u_model / alpha))
+    u_true_new  = jnp.where(done, u_true, _active_solver(u_true, T_k)[0])
+    return u_model_new, u_true_new, t + T_k
 
-    On avance en parallèle deux trajectoires depuis le même u0 :
+
+@partial(jax.jit, static_argnames=("n_steps",))
+def error_growth(u0, n_steps, t_final):
+    """Croissance de l'erreur bloc par bloc, blocs adaptatifs jusqu'à t_final.
+
+    On avance en parallèle deux trajectoires depuis le même u0, sur les mêmes durées de bloc :
       - u_true  : le vrai schéma numérique (référence) ;
       - u_model : le modèle.
     À chaque bloc on mesure la norme L2 physique de (u_model − u_true) et de u_true.
+    n_steps = n_steps_of(t_final, N) majore le nombre de blocs (V <= 1 -> blocs >= T_N) ;
+    une fois t_final atteint, les blocs suivants sont de durée ~0.
 
-    Renvoie (errs, norms_true), chacun de longueur n_steps.
+    Renvoie (errs, norms_true, times), chacun de longueur n_steps.
     """
     def block(carry, _):
-        u_model, u_true = carry
-        u_true_next = solver(u_true)[0]
-        u_model_next = step(u_model)
-        errs = (l2(u_model_next - u_true_next), l2(u_true_next))
-        return (u_model_next, u_true_next), errs
+        u_model, u_true, t = carry
+        u_model, u_true, t = _paired_block(u_model, u_true, t, t_final)
+        return (u_model, u_true, t), (l2(u_model - u_true), l2(u_true), t)
 
-    _, (errs, norms_true) = jax.lax.scan(block, (u0, u0), None, length=n_steps)
-    return errs, norms_true
+    _, (errs, norms_true, times) = jax.lax.scan(block, (u0, u0, 0.0), None, length=n_steps)
+    return errs, norms_true, times
 
 
 @partial(jax.jit, static_argnames=("n_steps",))
-def trajectories(u0, n_steps):
+def trajectories(u0, n_steps, t_final):
     """Comme error_growth, mais renvoie les champs à chaque bloc :
-    (u_true, u_model), chacun de forme (n_steps + 1, N), u0 inclus."""
+    (u_true, u_model, times), champs de forme (n_steps + 1, N), u0 et t = 0 inclus."""
     def block(carry, _):
-        u_true, u_model = carry
-        u_true = solver(u_true)[0]
-        u_model = step(u_model)
-        return (u_true, u_model), (u_true, u_model)
+        u_model, u_true, t = carry
+        u_model, u_true, t = _paired_block(u_model, u_true, t, t_final)
+        return (u_model, u_true, t), (u_true, u_model, t)
 
-    _, trajs = jax.lax.scan(block, (u0, u0), None, length=n_steps)
-    return tuple(jnp.concatenate([u0[None], tr], axis=0) for tr in trajs)
+    _, (u_true, u_model, times) = jax.lax.scan(block, (u0, u0, 0.0), None, length=n_steps)
+    return (jnp.concatenate([u0[None], u_true], axis=0),
+            jnp.concatenate([u0[None], u_model], axis=0),
+            jnp.concatenate([jnp.zeros(1), times]))
 
 
 def _bench(fn, *args, warmup=2, repeat=5):
@@ -352,9 +384,10 @@ def make_movie(name, N, t_final):
     from matplotlib.animation import FuncAnimation
 
     x, u0 = grids[N], test_functions[N][name]
-    T_N = T_of(N)
-    n_steps = n_steps_of(t_final, N)
-    u_true, u_pred = map(np.asarray, trajectories(u0, n_steps))
+    n_steps = n_blocks_max(t_final, N)
+    u_true, u_pred, times = map(np.asarray, trajectories(u0, n_steps, t_final))
+    n_frames = int(np.argmax(times >= t_final - 1e-6 * T_of(N))) + 1   # coupe les blocs figés après t_final
+    u_true, u_pred, times = u_true[:n_frames], u_pred[:n_frames], times[:n_frames]
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(x, u0, label='u₀', linestyle='--', alpha=0.4, color='gray')
@@ -373,10 +406,10 @@ def make_movie(name, N, t_final):
     def update(k):
         line_true.set_ydata(u_true[k])
         line_pred.set_ydata(u_pred[k])
-        title.set_text(f"« {name} »  —  N={N}  t={k * T_N:.2f}  (T={T_N:g})")
+        title.set_text(f"« {name} »  —  N={N}  t={times[k]:.2f}  (bloc {k}, T adaptatif)")
         return [line_true, line_pred, title]
 
-    anim = FuncAnimation(fig, update, frames=n_steps + 1, blit=False)
+    anim = FuncAnimation(fig, update, frames=n_frames, blit=False)
     out_path = f"movie_{name}_N{N}_t{t_final:g}.mp4"
     anim.save(out_path, writer=_movie_writer(), dpi=120)
     plt.close(fig)
@@ -500,14 +533,15 @@ n_rows = -(-len(FUNCTION_NAMES) // n_cols)
 fig_err, axes_err = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
 for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
     for N in RESOLUTIONS:
-        n_steps_err = n_steps_of(error_growth_time, N)
-        t_n = jnp.arange(1, n_steps_err + 1) * T_of(N)
-        errs_pur, _ = error_growth(test_functions[N][name], n_steps_err)
-        ax.plot(t_n, errs_pur, linewidth=1.5, label=f"N={N}")
-        print(f"[{name}] N={N} ‖ε‖_L2 : t={T_of(N):g} → {float(errs_pur[0]):.3e}   "
-              f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}")
+        n_steps_err = n_blocks_max(error_growth_time, N)
+        errs_pur, _, t_n = error_growth(test_functions[N][name], n_steps_err, error_growth_time)
+        n_bl = int(jnp.argmax(t_n >= error_growth_time - 1e-6 * T_of(N))) + 1   # blocs utiles
+        errs_pur, t_n = errs_pur[:n_bl], t_n[:n_bl]
+        ax.plot(t_n, errs_pur, linewidth=1.5, marker=".", label=f"N={N} ({n_bl} blocs)")
+        print(f"[{name}] N={N} ‖ε‖_L2 : t={float(t_n[0]):.3g} → {float(errs_pur[0]):.3e}   "
+              f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}   ({n_bl} blocs)")
     ax.set_title(name)
-    ax.set_xlabel("t_n = n · T_N")
+    ax.set_xlabel("t (blocs adaptatifs T_N / max|u|)")
     ax.set_ylabel("‖û_n − u_n(vrai)‖_L2")
     ax.set_yscale("log")
     ax.grid(True, alpha=0.3, which="both")

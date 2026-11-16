@@ -25,6 +25,28 @@ def predict_F(params, u0):
     return consistance + N - N_bar
 
 
+# Temps adaptatif à lambda fixé (comme Euler). Burgers est invariant d'échelle : si w résout Burgers,
+# u(x, t) = V w(x, V t) aussi. Un bloc normalise u par V = max|u| (vitesse max f'(u) = u), fait un pas du
+# réseau à lambda = T_target / dx fixe (régime d'entraînement, cône = stencil), remet à l'échelle, et dure
+# T = lambda dx / V : amplitude plus petite -> bloc plus long.
+LAMBDA = float(T_target * n)   # 25.6 à n = 256, T_target = 0.1
+
+
+def V_max(u):
+    if SOLVER == "advection":
+        return jnp.ones(())    # vitesse a, indépendante de l'amplitude : pas de changement d'échelle
+    return jnp.maximum(jnp.max(jnp.abs(u)), 1e-12)   # garde pour u = 0
+
+
+# un bloc du réseau sur les vraies valeurs ; renvoie (u au bout du bloc, durée physique du bloc)
+def bloc(params, u):
+    V = V_max(u)
+    w = u / V
+    F = predict_F(params, w)
+    w = w - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
+    return V * w, LAMBDA / u.shape[-1] / V
+
+
 Ktot  = n // 2 + 1
 kappa     = 0.8
 k0        = int(kappa * Ktot)
