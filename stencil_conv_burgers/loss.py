@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import optax
 from network import model, stencil_conv1D
 from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, PHYS_NORM, T_target, P, Q
+from burgers_solver import flux
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -57,16 +58,10 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
-    if PHYS_NORM == "L1":
-        # L1 relative (comme Euler) : régression vers la médiane, un choc décalé d'une cellule pèse moins -> moins d'étalement.
-        # Normalisée par la moyenne sur le batch de sum|cible| (pas par échantillon : une cible proche de 0 n'explose pas)
-        erreur    = jnp.sum(jnp.abs(erreur_vec), axis=1)                          # (batch,)
-        norme_l1  = jnp.mean(jnp.sum(jnp.abs(u_finals_batch), axis=1)) + 1e-12    # scalaire
-        loss_phys = jnp.mean(erreur / norme_l1)
-    else:
-        erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=1) + 1e-12)
-        norme  = jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=1) + 1e-12)
-        loss_phys = jnp.mean(erreur / norme)
+
+    erreur    = jnp.sum(jnp.abs(erreur_vec), axis=1)                          # (batch,)
+    norme_l1  = jnp.mean(jnp.sum(jnp.abs(u_finals_batch), axis=1)) + 1e-12    # scalaire
+    loss_phys = jnp.mean(erreur / norme_l1)
 
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
     e_hf    = e_hat[:, k0:Ktot]
@@ -81,6 +76,7 @@ def make_train_step(optimizer):
     @jax.jit
     def train_step(params, opt_state, u0s_batch, u_finals_batch):
         grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch)
+        jax.debug.print("lift {x}", x=jnp.linalg.norm(grads['params']['lifting']['kernel']))
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, new_opt_state
