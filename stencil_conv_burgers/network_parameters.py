@@ -13,7 +13,7 @@ N_TRAJ         = 150000  # nombre de trajectoires longues
 MULTIPLE_STEPS = 1  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
-T          = 0.1     # temps physique final des rollouts à pas CFL adaptatif (test.py)
+T          = 0.1    # temps physique final des rollouts à pas CFL adaptatif (test.py)
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)

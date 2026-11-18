@@ -76,7 +76,6 @@ def make_train_step(optimizer):
     @jax.jit
     def train_step(params, opt_state, u0s_batch, u_finals_batch):
         grads, _ = jax.grad(loss_fn, has_aux=True)(params, u0s_batch, u_finals_batch)
-        jax.debug.print("lift {x}", x=jnp.linalg.norm(grads['params']['lifting']['kernel']))
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, new_opt_state
