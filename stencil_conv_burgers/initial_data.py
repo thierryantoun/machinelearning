@@ -1,7 +1,9 @@
 import jax
 import jax.numpy as jnp
 from jax import random
-from network_parameters import K, T_target, x
+from network_parameters import K, LAMBDA, x
+
+T_BLOC_1 = LAMBDA / x.shape[0]   # durée d'un bloc pour max|u| = 1 : T_bloc = LAMBDA * dx / V
 
 
 def make_sinus_u0(key):
@@ -49,12 +51,12 @@ def generate_initial_data(key, nb_frequences=K, x=x, ic_type=None):
     def make_sinus_hf(subkey):
         """Ondulation haute fréquence (k > K) d'amplitude eps sur un fond lisse de grande échelle
         (modes 1..k_max, k_max <= 3, max|fond| = 1). eps est choisi pour que l'ondulation seule ne
-        fasse pas de choc pendant un bloc T_target (t* = 1 / (eps 2 pi kc) > T_target) ; après
+        fasse pas de choc pendant un bloc T_BLOC_1 (t* = 1 / (eps 2 pi kc) > T_BLOC_1) ; après
         normalisation globale (V ~ 1 + eps) elle reste petite, contrairement à un sinus HF seul
         que la normalisation ramènerait à amplitude 1 (chocs immédiats)."""
         k1, k2, k3, k4, k5, k6 = random.split(subkey, 6)
         kc  = random.randint(k1, (), K + 1, x.shape[0] // 2)       # fréquence au-dessus de K
-        eps = random.uniform(k2, (), minval=0.3, maxval=0.9) / (2 * jnp.pi * kc * T_target)
+        eps = random.uniform(k2, (), minval=0.3, maxval=0.9) / (2 * jnp.pi * kc * T_BLOC_1)
         phi = random.uniform(k3, (), minval=0.0, maxval=2 * jnp.pi)
         K_FOND  = 3
         ks      = jnp.arange(1, K_FOND + 1)
