@@ -273,9 +273,6 @@ def save_checkpoint(epoch):
 # warmup au début d'un entraînement neuf ou d'un nouveau stage ; pas de warmup pour une simple reprise
 warmup_start = start_epoch if (start_epoch == 0 or NEW_STAGE) else None
 
-# gradient seul (diagnostic), jitté une fois
-grad_fn = jax.jit(jax.grad(loss_fn, has_aux=True))
-
 for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond pour CE run
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
@@ -298,13 +295,6 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
     params, opt_state = run_epoch(
         params, opt_state, perm, u0s_epoch, u_finals_epoch, n_batches_epoch
     )
-
-    # norme L2 du gradient par couche (kernel + bias), sur le 1er batch de l'epoch, avec les params de fin d'epoch
-    idx = perm[:batch_size]
-    grads, _ = grad_fn(params, u0s_epoch[idx], u_finals_epoch[idx])
-    normes = {nom: float(jnp.sqrt(sum(jnp.sum(g ** 2) for g in jax.tree_util.tree_leaves(couche))))
-              for nom, couche in grads["params"].items()}
-    print(f"  grad epoch {epoch} | " + " ".join(f"{k}={v:.2e}" for k, v in normes.items()))
 
     if epoch % 10 == 0:
         # Évaluation par batches au lieu du dataset complet
