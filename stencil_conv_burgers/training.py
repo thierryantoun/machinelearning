@@ -11,12 +11,12 @@ import optax
 import pickle
 import math
 from network_parameters import (
-    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, T_target, a, P, Q,
+    MODEL, N_TRAJ, MULTIPLE_STEPS, N_TRAIN, batch_size, nb_epoch, x, SOLVER, NEW_STAGE, LAMBDA, a, P, Q,
     ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
 )
 from initial_data import generate_initial_data
 from stencil import stencil_size
-from loss import model, loss_fn, make_train_step, predict_F, V_max, bloc
+from loss import model, loss_fn, make_train_step, predict_F, V_max, T_bloc, bloc
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -34,9 +34,8 @@ PARAMS_PATH     = f"params_{MODEL}.pkl"
 key = random.PRNGKey(0)
 key_init, key_train, key_val = random.split(key, 3)
 
-# Le solveur prend maintenant T_target (temps physique fixe) au lieu de n_steps.
-# Plus de partial(_solver, n_steps=n_steps) : T_target est passe directement
-# a chaque appel dans generate_trajectory ci-dessous.
+# lambda = T * V / dx est fixé : chaque bloc dure T = T_bloc(u),
+# calculé par état dans generate_trajectory ci-dessous.
 
 N_VAL_TRAJ = max(1, N_TRAJ // 5)
 N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
@@ -44,25 +43,25 @@ N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
 # calcul stencil max sur tout le jeu de données pour savoir quelles valeurs prendre pour p et q
 # vitesses caractéristiques f'(u) : advection -> a constant, burgers -> u
 # les champs constants sont ignorés : rien ne s'y propage, et la consistance locale
-# donne déjà F = f(c) exactement (paires normalisées par V dans generate_trajectory : bornes attendues [-1, 1])
-def wave_speed_bounds(*datasets):
+# donne déjà F = f(c) exactement. Paires normalisées par le V de l'entrée, comme dans la loss :
+# bornes attendues [-1, 1]
+def wave_speed_bounds(u0s, u_finals):
     if SOLVER == "advection":
         return a, a
-    u = jnp.concatenate(datasets, axis=0)
+    Vs = jax.vmap(V_max)(u0s)[:, None]
+    u = jnp.concatenate([u0s / Vs, u_finals / Vs], axis=0)
     non_constant = (jnp.max(u, axis=1) - jnp.min(u, axis=1)) > 1e-8
     u = u[non_constant]
     return float(jnp.min(u)), float(jnp.max(u))
 
 def generate_trajectory(key):
-    """Trajectoire de MULTIPLE_STEPS blocs à lambda fixé : le bloc k dure T_target / V(u_k).
-    Paires stockées normalisées par le V de l'entrée (max|entrée| = 1) ; la trajectoire continue
-    sur les vraies valeurs. ts = t * V, temps normalisé, doit valoir T_target."""
+    "Trajectoire de MULTIPLE_STEPS blocs en vraies valeurs, chacun integre sur T = T_bloc(u)."
     u0 = generate_initial_data(key)
 
     def run_chunk(u, _):
-        V = V_max(u)
-        u_next, _, t = _solver(u, T_target / V)
-        return u_next, (u / V, u_next / V, t * V)
+        T = T_bloc(u)
+        u_next, _, _ = _solver(u, T)
+        return u_next, (u, u_next, T)
 
     _, (u0s, u_finals, ts) = jax.lax.scan(run_chunk, u0, None, length=MULTIPLE_STEPS)
     return u0s, u_finals, ts
@@ -104,11 +103,10 @@ def generate_onpolicy_pairs(key, params):
     gather_traj = jax.vmap(lambda states, ds: states[ds])  # (max_steps+1,n),(k,) -> (k,n)
     u0s_corrupted = jax.lax.stop_gradient(gather_traj(all_states, depths))  # (ONPOLICY_TRAJ, k, n)
     u0s_corrupted = u0s_corrupted.reshape(-1, u0s_corrupted.shape[-1])      # (ONPOLICY_TRAJ*k, n)
-    # même format que les paires de generate_trajectory : entrée normalisée (max| | = 1), bloc de T_target
-    u0s_corrupted = u0s_corrupted / jax.vmap(V_max)(u0s_corrupted)[:, None]
 
+    # même format que les paires de generate_trajectory : vraies valeurs, bloc de T_bloc(u)
     def relabel(u):
-        u_true_next, _, _ = _solver(u, T_target)
+        u_true_next, _, _ = _solver(u, T_bloc(u))
         return u_true_next
 
     u_finals_true = jax.vmap(relabel)(u0s_corrupted)
@@ -121,7 +119,7 @@ key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
 u0s_traj, u_finals_traj, ts_traj = jax.vmap(generate_trajectory)(random.split(key_traj_train, N_TRAJ))
 u0s_training      = u0s_traj.reshape(-1, x.shape[0])
 u_finals_training = u_finals_traj.reshape(-1, x.shape[0])
-ts_training       = ts_traj.reshape(-1)   # constant = T_target, garde juste pour verification/log
+ts_training       = ts_traj.reshape(-1)   # durée physique de chaque bloc, T_bloc(u0)
 
 u0s_traj_val, u_finals_traj_val, ts_traj_val = jax.vmap(generate_trajectory)(random.split(key_traj_val, N_VAL_TRAJ))
 u0s_validation      = u0s_traj_val.reshape(-1, x.shape[0])
@@ -129,28 +127,21 @@ u_finals_validation = u_finals_traj_val.reshape(-1, x.shape[0])
 ts_validation       = ts_traj_val.reshape(-1)
 
 
-a_min, a_max = wave_speed_bounds(u0s_training, u_finals_training,
-                                 u0s_validation, u_finals_validation)
-lam  = float(T_target / dx)
-p, q = stencil_size(a_min, a_max, lam)
-print(f"Vitesses : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={lam:.4f} "
+a_min, a_max = wave_speed_bounds(jnp.concatenate([u0s_training, u0s_validation]),
+                                 jnp.concatenate([u_finals_training, u_finals_validation]))
+p, q = stencil_size(a_min, a_max, LAMBDA)
+print(f"Vitesses normalisées : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={LAMBDA:g} "
       f"-> stencil p={p} (gauche), q={q} (droite), {p + q + 1} points")
 
 assert u0s_training.shape[0] == N_TRAIN
 n_batches     = max(1, N_TRAIN // batch_size)
 n_batches_val = max(1, N_VAL // batch_size)
 
-# Diagnostic : ts_training doit maintenant etre constant (= T_target partout).
-# On garde le print par securite, pour detecter tout ecart inattendu (bug de
-# generation, T_target mal propage, etc.) plutot que de le supprimer purement.
-print(f"T_batch: min={ts_training.min():.6f}, max={ts_training.max():.6f}, mean={ts_training.mean():.6f} "
-      f"(devrait etre constant = T_target = {T_target})")
+print(f"T_bloc (durée physique des blocs) : min={ts_training.min():.6f}, max={ts_training.max():.6f}, "
+      f"mean={ts_training.mean():.6f}")
 print(f"dx = {dx:.6f}")
-print(f"T_target/dx (facteur d'amplification, fixe) : {T_target/dx:.2f}")
+print(f"T * V / dx (facteur d'amplification, fixe) : {LAMBDA:.2f}")
 
-# optimiseur
-# LR piloté depuis Python : warmup linéaire puis reduce-on-plateau sur la val loss.
-# inject_hyperparams met le LR dans opt_state -> on le change entre deux epochs sans recompiler run_epoch.
 PEAK_LR       = 5e-4
 WARMUP_EPOCHS = 5
 LR_PATIENCE   = 20     # epochs sans amélioration de la val avant de baisser le LR (multiple de 10 : éval toutes les 10 epochs)

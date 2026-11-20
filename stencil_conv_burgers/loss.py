@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model, stencil_conv1D
-from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, PHYS_NORM, T_target, P, Q
+from network_parameters import x, a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, PHYS_NORM, LAMBDA, P, Q
 from burgers_solver import flux
 
 if SOLVER == "advection":
@@ -16,36 +16,34 @@ dx = x[1] - x[0]
 # fenêtre j constante -> w_j = w_bar_j -> F = f(wb_j), quels que soient les poids
 def predict_F(params, u0):
     S     = jnp.concatenate([jnp.zeros(1), jnp.cumsum(jnp.pad(u0, (P, Q), mode="wrap"))])  # (n+P+Q+1,)
-    wb    = (S[P + Q + 1:] - S[:u0.shape[-1]]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
+    wb_L = (S[P + 1:n + P + 1] - S[:n]) / (P + 1)   
+    wb_R = (S[P + Q + 1:] - S[P + 1:n + P + 1]) / Q  
+    wb    = (wb_L + wb_R) / 2
     N     = model.apply(params, u0)                   # (n,) convolution sur u0
     N_bar = model.apply(params, wb, method=stencil_conv1D.constant)  # (n,) fenêtres constantes (wb_j, ..., wb_j)
-    if SOLVER == "advection":
-        consistance = a * wb
-    else:
-        consistance = wb**2 / 2.0
+    consistance = flux(wb_L, wb_R)
     return consistance + N - N_bar
 
 
-# Temps adaptatif à lambda fixé (comme Euler). Burgers est invariant d'échelle : si w résout Burgers,
-# u(x, t) = V w(x, V t) aussi. Un bloc normalise u par V = max|u| (vitesse max f'(u) = u), fait un pas du
-# réseau à lambda = T_target / dx fixe (régime d'entraînement, cône = stencil), remet à l'échelle, et dure
-# T = lambda dx / V : amplitude plus petite -> bloc plus long.
-LAMBDA = float(T_target * n)   # 25.6 à n = 256, T_target = 0.1
-
-
+# V = max|f'(u)| = max|u|, un nombre par état, recalculé à chaque bloc
 def V_max(u):
     if SOLVER == "advection":
-        return jnp.ones(())    # vitesse a, indépendante de l'amplitude : pas de changement d'échelle
+        return jnp.ones(())    # vitesse a, indépendante de l'amplitude
     return jnp.maximum(jnp.max(jnp.abs(u)), 1e-12)   # garde pour u = 0
 
 
-# un bloc du réseau sur les vraies valeurs ; renvoie (u au bout du bloc, durée physique du bloc)
+# durée d'un bloc : T = LAMBDA * dx / V, quelle que soit la grille de u (comme une CFL)
+def T_bloc(u):
+    return LAMBDA / u.shape[-1] / V_max(u)
+
+
+# un bloc du réseau sur les vraies valeurs
 def bloc(params, u):
     V = V_max(u)
     w = u / V
     F = predict_F(params, w)
     w = w - LAMBDA * (F - jnp.roll(F, 1, axis=-1))
-    return V * w, LAMBDA / u.shape[-1] / V
+    return V * w, T_bloc(u)
 
 
 Ktot  = n // 2 + 1
@@ -53,9 +51,13 @@ kappa     = 0.8
 k0        = int(kappa * Ktot)
 
 
-def _loss_fno(params, u0s_batch, u_finals_batch):
+# u0s_batch, u_finals_batch : (batch, n), vraies valeurs, u_final à T_bloc(u0) de u0
+def _loss_fn(params, u0s_batch, u_finals_batch):
+    Vs = jax.vmap(V_max)(u0s_batch)[:, None]
+    u0s_batch      = u0s_batch / Vs        # entrée et cible avec le même V, celui de l'entrée
+    u_finals_batch = u_finals_batch / Vs
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
-    u_pred = u0s_batch - (T_target / dx) * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    u_pred = u0s_batch - LAMBDA * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
     erreur_vec = u_pred - u_finals_batch
 
@@ -70,7 +72,7 @@ def _loss_fno(params, u0s_batch, u_finals_batch):
     loss = lambda_phys * loss_phys + lambda_hf * loss_hf
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf}
 
-loss_fn = jax.jit(_loss_fno)
+loss_fn = jax.jit(_loss_fn)
 
 def make_train_step(optimizer):
     @jax.jit

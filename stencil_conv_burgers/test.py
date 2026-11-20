@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
-from network_parameters import SOLVER, T_target, n, cfl, T
+from network_parameters import SOLVER, LAMBDA, n, cfl, T
 from loss import predict_F, V_max
 
 if SOLVER == "advection":
@@ -15,7 +15,7 @@ if SOLVER == "advection":
 else:
     from burgers_solver import burgers_solver as _active_solver
 
-with open("params_fno.pkl", "rb") as f:
+with open("params_stencil_conv1D.pkl", "rb") as f:
     params = pickle.load(f)
 
 # Params entraînés avec l'ancienne version (noyau déclaré à la main : params/kernel, params/bias)
@@ -37,8 +37,7 @@ if "kernel" in params["params"]:
 # taille de u : les fonctions jit ci-dessous se recompilent une fois par
 # résolution, rien d'autre à changer.
 # ------------------------------------------------------------------
-LAMBDA      = float(T_target * n)   # 25.6 à l'entraînement (n=256, T=0.1)
-RESOLUTIONS = [256]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
+RESOLUTIONS = [256,512,1024]   # grille d'entraînement seule pour l'instant ; [256, 512, 1024] pour le multi-résolution
 PERF_RESOLUTIONS = [256, 512, 1024]   # perf modèle vs solveur : grille d'entraînement + résolutions plus fines (λ fixe)
 
 
@@ -204,10 +203,10 @@ def make_test_functions(x):
         "triangle":     2 / jnp.pi * jnp.arcsin(jnp.sin(2 * jnp.pi * x)),
         "carre":        jnp.sign(jnp.sin(2 * jnp.pi * x)),
         "paquet_onde":  jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x),
-        "sinus_simple": jnp.sin(2 * jnp.pi * x),
+        "sinus_simple": 20*jnp.sin(2 * jnp.pi * x),
         "somme_sinus":  u0_somme_sinus / jnp.max(jnp.abs(u0_somme_sinus)),
         # Riemann simple (formation de choc en Burgers)
-        "riemann":      jnp.where(x < 0.5, 1.0, -0.5),
+        "riemann":      jnp.where(x < 0.5, 20*jnp.sin(70*jnp.pi*x), jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x)),
     }
 
 
@@ -222,109 +221,12 @@ print(f"lambda = {LAMBDA:g} fixé ; " + ", ".join(
     f"N={N} : T={T_of(N):g}, {make_grid(N).shape[0]} points" for N in RESOLUTIONS))
 
 # ------------------------------------------------------------------
-# Erreur à UN pas, par résolution (protocole étape 2). Prédiction du doc :
-# erreur par pas du même ordre aux trois résolutions, pas d'explosion en
-# x = 0.5. On affiche l'erreur relative L2 (comme la loss) et l'endroit de
-# l'erreur ponctuelle max.
-# ------------------------------------------------------------------
-print("\n--- Erreur à un pas (relative L2 | max |err| @ x) ---")
-print(f"{'traj':<14}" + "".join(f"{'N=' + str(N):>30}" for N in RESOLUTIONS))
-for name in FUNCTION_NAMES:
-    row = f"{name:<14}"
-    for N in RESOLUTIONS:
-        u0 = test_functions[N][name]
-        u_true = solver(u0)[0]
-        u_pred = step(u0)
-        err = u_pred - u_true
-        rel = float(l2(err) / (l2(u_true) + 1e-12))
-        j = int(jnp.argmax(jnp.abs(err)))
-        row += f"{rel:>12.2e} | {float(jnp.abs(err[j])):.2e} @ {float(grids[N][j]):.3f}"
-    print(row)
-
-# ------------------------------------------------------------------
-# Test d'exactitude de l'invariance (doc §2) : sur la grille m*n, le champ
-# u0(m x) échantillonné vaut exactement u0 sur la grille n répété m fois
-# (jnp.tile, u0 périodique de période 1). Toutes les opérations étant en
-# cellules (fenêtres, couches ponctuelles, R interpolé qui tombe exactement
-# sur la table aux modes multiples de m), F, le pas du modèle et le pas du
-# solveur doivent être ceux de la grille n, répétés m fois, à l'arrondi
-# float32 près (~1e-6). Un écart plus grand = bug d'implémentation, pas un
-# défaut de généralisation.
-# ------------------------------------------------------------------
-EXACT_TOL = 1e-4
-
-print(f"\n--- Test d'exactitude : u0(m x) sur N = m*{n}  vs  u0(x) sur N = {n} répété m fois ---")
-print("    (écart max absolu ; attendu ~1e-6)")
-print(f"{'traj':<14}{'N':>6}{'F':>12}{'pas modèle':>12}{'pas solveur':>13}")
-exact_ok = True
-for name in FUNCTION_NAMES:
-    u0_ref = make_test_functions(make_grid(n))[name]
-    F_ref, u_model_ref, u_true_ref = predict_F(params, u0_ref), step(u0_ref), solver(u0_ref)[0]
-    for N in RESOLUTIONS:
-        if N == n or N % n != 0:
-            continue
-        m = N // n
-        u0_m = jnp.tile(u0_ref, m)
-        gaps = [float(jnp.max(jnp.abs(a - jnp.tile(b, m)))) for a, b in (
-            (predict_F(params, u0_m), F_ref),
-            (step(u0_m), u_model_ref),
-            (solver(u0_m)[0], u_true_ref),
-        )]
-        exact_ok &= max(gaps) < EXACT_TOL
-        print(f"{name:<14}{N:>6}" + "".join(f"{g:>12.2e}" for g in gaps[:2]) + f"{gaps[2]:>13.2e}")
-print("=> invariance exacte OK" if exact_ok else
-      f"=> ÉCART > {EXACT_TOL:g} : l'implémentation n'est pas exactement en unités de cellules")
-
-# ------------------------------------------------------------------
-# Riemann vu EN CELLULES autour du saut initial (x = 0.5).
-# Un saut est un saut sur une cellule à toute résolution : à lambda fixé,
-# les fenêtres autour du choc sont identiques cellule par cellule à
-# 256, 512 et 1024 points (l'autre saut, en x = 0, est à >= 128 cellules,
-# hors de la fenêtre de P+Q+1 cellules). La partie LOCALE du réseau rend
-# donc la même sortie partout : on attend un écart ~1e-6 (float32).
-# ------------------------------------------------------------------
-CELL_HALF_WIDTH = 40          # cellules affichées de part et d'autre du saut
-CELL_FUNCTIONS  = ["riemann"]
-
-jj = jnp.arange(-CELL_HALF_WIDTH, CELL_HALF_WIDTH + 1)
-print(f"\n--- Riemann en cellules : écart max à N={RESOLUTIONS[0]}, sur ±{CELL_HALF_WIDTH} cellules du saut ---")
-print(f"    (attendu ~1e-6 : réseau purement local)")
-for name in CELL_FUNCTIONS:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
-    ref_pred = ref_true = None
-    for N in RESOLUTIONS:
-        u0 = test_functions[N][name]
-        j0 = N // 2                                   # saut initial en x = 0.5
-        up = step(u0)[j0 + jj]
-        ut = solver(u0)[0][j0 + jj]
-        axes[0].plot(jj, up, "o-", ms=3, lw=1, label=f"modèle N={N}")
-        if N == RESOLUTIONS[0]:
-            axes[0].plot(jj, ut, "k--", lw=1.2, label=f"cible N={N}")
-            ref_pred, ref_true = up, ut
-        else:
-            axes[1].plot(jj, up - ref_pred, "o-", ms=3, lw=1, label=f"modèle N={N} − N={RESOLUTIONS[0]}")
-            axes[1].plot(jj, ut - ref_true, "--", lw=1, label=f"cible N={N} − N={RESOLUTIONS[0]}")
-            print(f"[{name}] N={N} : modèle {float(jnp.max(jnp.abs(up - ref_pred))):.2e}   "
-                  f"cible {float(jnp.max(jnp.abs(ut - ref_true))):.2e}")
-    axes[0].set_title(f"« {name} » après 1 pas, en cellules (lambda={LAMBDA:g})")
-    axes[1].set_title(f"écart à N={RESOLUTIONS[0]}, cellule par cellule")
-    for ax in axes:
-        ax.set_xlabel("cellules depuis le saut initial (x = 0.5)")
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8)
-    fig.tight_layout()
-    out_path = f"cellules_{name}.png"
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Figure sauvegardée : {out_path}")
-
-# ------------------------------------------------------------------
 # Snapshots : cible vs modèle après n_blocks blocs, un
 # panneau par résolution. Un bloc dure T_N = LAMBDA / N : n_blocks = 1 donne
 # N=256 à T=0.1, N=512 à T=0.05, N=1024 à T=0.025 (même lambda, même nombre
 # de pas -> c'est la comparaison directe de l'invariance du doc §2).
 # ------------------------------------------------------------------
-SNAPSHOT_BLOCKS = [10]   # nombres de blocs (ex: [1, 10, 100])
+SNAPSHOT_BLOCKS = [1]   # nombres de blocs (ex: [1, 10, 100])
 SNAPSHOT_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
 
 
@@ -364,7 +266,7 @@ for name in SNAPSHOT_FUNCTIONS:
 MAKE_MOVIES = True     # False pour désactiver les films
 MOVIE_TIME = T         # temps physique final du film (T de network_parameters)
 MOVIE_FPS = 20
-MOVIE_FUNCTIONS = ["triangle", "carre", "somme_sinus", "sinus_simple", "riemann"]
+MOVIE_FUNCTIONS = ["sinus_simple","riemann"]
 MOVIE_RESOLUTIONS = [RESOLUTIONS[0]]   # films coûteux : par défaut la grille d'entraînement seule
 
 
@@ -422,7 +324,7 @@ if MAKE_MOVIES:
             make_movie(name, N, MOVIE_TIME)
 
     # Films supplémentaires aux grilles fines (T_N = 0.05 à N=512, 0.025 à N=1024).
-    EXTRA_MOVIE_FUNCTIONS = ["riemann", "carre"]
+    EXTRA_MOVIE_FUNCTIONS = ["riemann"]
     EXTRA_MOVIE_RESOLUTIONS = [N for N in (512, 1024) if N in RESOLUTIONS]   # vide si on reste à 256
     for N in EXTRA_MOVIE_RESOLUTIONS:
         for name in EXTRA_MOVIE_FUNCTIONS:
@@ -534,15 +436,17 @@ fig_err, axes_err = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows
 for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
     for N in RESOLUTIONS:
         n_steps_err = n_blocks_max(error_growth_time, N)
-        errs_pur, _, t_n = error_growth(test_functions[N][name], n_steps_err, error_growth_time)
+        errs_pur, norms_true, t_n = error_growth(test_functions[N][name], n_steps_err, error_growth_time)
         n_bl = int(jnp.argmax(t_n >= error_growth_time - 1e-6 * T_of(N))) + 1   # blocs utiles
-        errs_pur, t_n = errs_pur[:n_bl], t_n[:n_bl]
-        ax.plot(t_n, errs_pur, linewidth=1.5, marker=".", label=f"N={N} ({n_bl} blocs)")
-        print(f"[{name}] N={N} ‖ε‖_L2 : t={float(t_n[0]):.3g} → {float(errs_pur[0]):.3e}   "
-              f"t={float(t_n[-1]):g} → {float(errs_pur[-1]):.3e}   ({n_bl} blocs)")
+        # erreur L2 relative au carré, même quantité que MSE_norm (perf) : ‖û − u‖² / ‖u‖²
+        errs_rel = (errs_pur[:n_bl] / (norms_true[:n_bl] + 1e-12)) ** 2
+        t_n = t_n[:n_bl]
+        ax.plot(t_n, errs_rel, linewidth=1.5, marker=".", label=f"N={N} ({n_bl} blocs)")
+        print(f"[{name}] N={N} ‖ε‖²/‖u‖² : t={float(t_n[0]):.3g} → {float(errs_rel[0]):.3e}   "
+              f"t={float(t_n[-1]):g} → {float(errs_rel[-1]):.3e}   ({n_bl} blocs)")
     ax.set_title(name)
     ax.set_xlabel("t (blocs adaptatifs T_N / max|u|)")
-    ax.set_ylabel("‖û_n − u_n(vrai)‖_L2")
+    ax.set_ylabel("‖û_n − u_n(vrai)‖²_L2 / ‖u_n(vrai)‖²_L2")
     ax.set_yscale("log")
     ax.grid(True, alpha=0.3, which="both")
     ax.legend()
