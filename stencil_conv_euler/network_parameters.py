@@ -24,8 +24,8 @@ LAMBDA     = 25.6              # lambda = T * V / dx fixé, en cellules : l'onde
 MARGE      = 1.0
 Q          = math.ceil(MARGE * LAMBDA)
 P          = Q - 1
-batch_size = min(64, N_TRAIN)   # borné pour les petits tests (N_TRAIN < 64)
-nb_epoch   = 500
+batch_size = 128
+nb_epoch   = 710   # plafond de sécurité par run (compté depuis l'epoch de reprise) : l'arrêt normal vient de MIN_LR (training.py)
 n_batches  = N_TRAIN // batch_size
 
 lambda_hf   = 1.0
