@@ -18,7 +18,7 @@ class stencil_conv1D_block(nn.Module):
 class stencil_conv1D(nn.Module):
     activation: callable
     dv: int
-    n_blocks: int = 4
+    n_blocks: int 
     p: int = P   # points à gauche du point central
     q: int = Q   # points à droite
 
@@ -53,4 +53,4 @@ class stencil_conv1D(nn.Module):
         return self._head(c[:, None] * jnp.sum(kernel, axis=(0, 1)) + bias)
 
 
-model = stencil_conv1D(activation=nn.gelu, dv=250, n_blocks=3)
+model = stencil_conv1D(activation=nn.gelu, dv=300, n_blocks=3)
