@@ -203,10 +203,10 @@ def make_test_functions(x):
         "triangle":     2 / jnp.pi * jnp.arcsin(jnp.sin(2 * jnp.pi * x)),
         "carre":        jnp.sign(jnp.sin(2 * jnp.pi * x)),
         "paquet_onde":  jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x),
-        "sinus_simple": 20*jnp.sin(2 * jnp.pi * x),
+        "sinus_simple": jnp.sin(2 * jnp.pi * x),
         "somme_sinus":  u0_somme_sinus / jnp.max(jnp.abs(u0_somme_sinus)),
         # Riemann simple (formation de choc en Burgers)
-        "riemann":      jnp.where(x < 0.5, 20*jnp.sin(70*jnp.pi*x), jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x)),
+        "riemann":      jnp.where(x < 0.5, jnp.sin(70*jnp.pi*x), jnp.exp(-100 * (x - 0.5) ** 2) * jnp.sin(8 * jnp.pi * x)),
     }
 
 
@@ -427,7 +427,7 @@ print_band_table("Erreur par bande de fréquence")
 # double/quadruple près pour atteindre le même t, cf. doc §8).
 # ------------------------------------------------------------------
 # None -> temps physique max des figures de prédiction (max(PHYSICAL_TIMES))
-ERROR_GROWTH_TIME = None
+ERROR_GROWTH_TIME = 1
 error_growth_time = ERROR_GROWTH_TIME if ERROR_GROWTH_TIME is not None else max(PHYSICAL_TIMES)
 
 n_cols = 3
@@ -439,17 +439,19 @@ for ax, name in zip(axes_err.flat, FUNCTION_NAMES):
         errs_pur, norms_true, t_n = error_growth(test_functions[N][name], n_steps_err, error_growth_time)
         n_bl = int(jnp.argmax(t_n >= error_growth_time - 1e-6 * T_of(N))) + 1   # blocs utiles
         # erreur L2 relative au carré, même quantité que MSE_norm (perf) : ‖û − u‖² / ‖u‖²
-        errs_rel = (errs_pur[:n_bl] / (norms_true[:n_bl] + 1e-12)) ** 2
+        #errs_rel = (errs_pur[:n_bl] / (norms_true[:n_bl] + 1e-12)) ** 2
         t_n = t_n[:n_bl]
-        ax.plot(t_n, errs_rel, linewidth=1.5, marker=".", label=f"N={N} ({n_bl} blocs)")
-        print(f"[{name}] N={N} ‖ε‖²/‖u‖² : t={float(t_n[0]):.3g} → {float(errs_rel[0]):.3e}   "
-              f"t={float(t_n[-1]):g} → {float(errs_rel[-1]):.3e}   ({n_bl} blocs)")
+        err_abs  = errs_pur[:n_bl] ** 2      # ‖û − u‖² : erreur absolue, sans normalisation
+        #line, = ax.plot(t_n, errs_rel, linewidth=1.5, marker=".", label=f"N={N} avec norm ({n_bl} blocs)")
+        ax.plot(t_n, err_abs, linewidth=1.5, marker=".", label=f"N={N} ({n_bl} blocs)")
+        #print(f"[{name}] N={N} ‖ε‖²/‖u‖² : t={float(t_n[0]):.3g} → {float(errs_rel[0]):.3e}   "
+        #      f"t={float(t_n[-1]):g} → {float(errs_rel[-1]):.3e}   ({n_bl} blocs)")
     ax.set_title(name)
     ax.set_xlabel("t (blocs adaptatifs T_N / max|u|)")
-    ax.set_ylabel("‖û_n − u_n(vrai)‖²_L2 / ‖u_n(vrai)‖²_L2")
+    ax.set_ylabel("‖û−u‖²   (L2)")
     ax.set_yscale("log")
     ax.grid(True, alpha=0.3, which="both")
-    ax.legend()
+    ax.legend(fontsize=7)
 for ax in list(axes_err.flat)[len(FUNCTION_NAMES):]:
     ax.axis("off")
 fig_err.suptitle(f"Croissance de l'erreur du modèle à lambda={LAMBDA:g} fixé")
