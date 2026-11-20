@@ -13,17 +13,17 @@ N_TRAJ         = 150000  # nombre de trajectoires longues
 MULTIPLE_STEPS = 1  # nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
-T          = 0.1    # temps physique final des rollouts à pas CFL adaptatif (test.py)
+T          = 1  # temps physique final des rollouts à pas CFL adaptatif (test.py)
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-T_target   = 0.1               # lambda = T_target * n = 25.6 à n=256
+LAMBDA     = 25.6              # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
 
 # Bornes des vitesses caractéristiques f'(u) = min u0, max u0 (cf. print de training.py)
 # -> taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la
 # sortie du réseau en dépendent. lambda=25.6, u0 in [-1, 1] -> P=25, Q=26 (52 cellules)
 A_MIN, A_MAX = -1.0, 1.0
-P, Q       = stencil_size(A_MIN, A_MAX, T_target * n)
+P, Q       = stencil_size(A_MIN, A_MAX, LAMBDA)
 batch_size = 128   # borné pour les petits tests (N_TRAIN < 64)
 nb_epoch   = 710   # plafond de sécurité par run (compté depuis l'epoch de reprise) : l'arrêt normal vient de MIN_LR (training.py)
 n_batches  = N_TRAIN // batch_size
@@ -37,14 +37,14 @@ lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièreme
 # en plus des paires (u0, u_final) issues du vrai solveur, on déroule
 # le modèle courant (arrêt de gradient) depuis des IC fraîches puis on
 # interroge le vrai solveur depuis l'état atteint pour ré-étiqueter
-# correctement. Le réseau apprend ainsi �|  corriger ses propres erreurs
-# accumulées, pas seulement �|  reproduire des trajectoires "propres".
+# correctement. Le réseau apprend ainsi à corriger ses propres erreurs
+# accumulées, pas seulement à reproduire des trajectoires "propres".
 # ------------------------------------------------------------------
 ONPOLICY_ENABLED       = False
 ONPOLICY_TRAJ          = N_TRAJ   # nb de trajectoires on-policy régénérées
 ONPOLICY_MAX_STEPS     = 40       # profondeur max de rollout modèle avant relabelling
 ONPOLICY_DEPTHS_PER_TRAJ = 4      # nb de profondeurs piochées par trajectoire (les 40 états
-                                   # sont déj�|  calculés pour rien de plus, autant en garder
+                                   # sont déjà calculés pour rien de plus, autant en garder
                                    # plusieurs -> ONPOLICY_TRAJ * ONPOLICY_DEPTHS_PER_TRAJ paires/epoch)
 ONPOLICY_REGEN_EVERY   = 1        # régénère les paires on-policy tous les N epochs
 
