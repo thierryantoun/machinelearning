@@ -12,13 +12,13 @@ class stencil_conv1D_block(nn.Module):
         self.W = nn.Dense(features=self.width, use_bias=False)
 
     def __call__(self, v):
-        return self.activation(self.W(v))
+        return v + self.activation(self.W(v))
 
 
 class stencil_conv1D(nn.Module):
     activation: callable
     dv: int
-    n_blocks: int = 4
+    n_blocks: int
     p: int = P   # points à gauche du point central
     q: int = Q   # points à droite
 
@@ -53,4 +53,4 @@ class stencil_conv1D(nn.Module):
         return self._head(c.T @ jnp.sum(kernel, axis=0) + bias)
 
 
-model = stencil_conv1D(activation=nn.gelu, dv=160, n_blocks=2)   # dv >= 3*(P+Q+1) = 156 : plus de directions de la fenêtre invisibles au lifting
+model = stencil_conv1D(activation=nn.gelu, dv=300, n_blocks=3)   # dv >= 3*(P+Q+1) = 156 : plus de directions de la fenêtre invisibles au lifting
