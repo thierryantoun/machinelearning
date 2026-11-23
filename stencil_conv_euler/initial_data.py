@@ -166,6 +166,26 @@ def ic_types_euler(key):
     return riemann, jnp.stack([ic_type_scalar(k) for k in (k_rho, k_u, k_p)])
 
 
+# Types effectifs : ce qui reste de chaque variable à la fin de generate_initial_data_euler.
+# 0..9 : familles scalaires (3 « constante » ramenée à CONST), CONST : variable constante, RIEMANN_COMMUN : saut commun
+CONST, RIEMANN_COMMUN = 10, 11
+TYPE_NOMS = ["sinus", "gaussiennes", "polynomes", "constante", "rampe", "marches", "creneau",
+             "riemann", "sinus_hf", "champ_gaussien", "CONST", "RIEMANN_COMMUN"]
+
+
+def ic_ids_euler(key):
+    """(types effectifs (3,) de rho, u, p ; riemann_commun : bool ; u_zero : bool) pour generate_initial_data_euler(key).
+    DOIT reproduire ses random.split (étape Riemann commun, puis étape constantes, dans cet ordre d'écrasement)."""
+    riemann, types = ic_types_euler(key)
+    _, _, k_const, _, k_u0 = random.split(random.fold_in(key, 1), 5)
+    const  = random.bernoulli(k_const, P_CONST, (3, 1))[:, 0]
+    u_zero = const[1] & random.bernoulli(k_u0, P_U_ZERO)
+    types = jnp.where(types == 3, CONST, types)          # famille « constante » : champ constant
+    types = jnp.where(riemann, RIEMANN_COMMUN, types)    # écrasé par le Riemann commun
+    types = jnp.where(const, CONST, types)               # écrasé par l'étape constantes (passe en dernier)
+    return types, riemann, u_zero
+
+
 def generate_initial_data_euler(key):
     """U0 : (3, n), variables conservatives (rho, rho*u, E). Une forme indépendante par variable
     primitive ; l'exponentielle garantit rho > 0 et p > 0."""
@@ -191,7 +211,7 @@ def generate_initial_data_euler(key):
     # (par périodicité, un second saut en x = 0). Plage élargie pour rho et p seulement :
     # rho : f dans [-1.5, 1.5] -> rapports jusqu'à e^3 ≈ 20 (Sod : 8) ;
     # p   : f dans [-6, 6]     -> rapports jusqu'à e^12 ≈ 1.6e5 (blast : 1e5) ; u reste dans [-1, 1]
-    AMP_RIEMANN = jnp.array([[1.5], [1.0], [6.0]])                      # (rho, u, p)
+    AMP_RIEMANN = jnp.array([[1.5], [1.0], [1.5]])                      # (rho, u, p)
     split     = random.uniform(k_split, (), minval=0.0, maxval=1.0)
     f_L       = AMP_RIEMANN * random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
     f_R       = AMP_RIEMANN * random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
