@@ -228,6 +228,16 @@ def generate_initial_data_euler(key):
     split     = random.uniform(k_split, (), minval=0.5 * (x[1] - x[0]), maxval=x[-1])
     f_L       = AMP_RIEMANN * random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
     f_R       = AMP_RIEMANN * random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
+    # p : écart de log-pression d = |f_L - f_R| uniforme dans [0, 2 A_p] (au lieu de f_L, f_R indépendants,
+    # où P(d >= 11.5, rapport 1e5) ~ 0.2 %), centre m uniforme tel que f_L, f_R restent dans [-A_p, A_p], signe aléatoire.
+    # Clés par fold_in(key, 2) : les random.split existants (diagnostic ic_types_euler) ne changent pas
+    k_d, k_m, k_s = random.split(random.fold_in(key, 2), 3)
+    A_p   = AMP_RIEMANN[2, 0]
+    d     = random.uniform(k_d, (), minval=0.0, maxval=2.0 * A_p)
+    m     = random.uniform(k_m, (), minval=-A_p + 0.5 * d, maxval=A_p - 0.5 * d)
+    signe = jnp.where(random.bernoulli(k_s), 1.0, -1.0)
+    f_L   = f_L.at[2, 0].set(m + 0.5 * signe * d)
+    f_R   = f_R.at[2, 0].set(m - 0.5 * signe * d)
     f_riemann = jnp.where(x < split, f_L, f_R)                          # (3, n)
     f_rho, f_u, f_p = jnp.where(random.bernoulli(k_mode, P_RIEMANN), f_riemann, jnp.stack([f_rho, f_u, f_p]))
 

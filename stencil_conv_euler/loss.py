@@ -90,15 +90,16 @@ k0        = int(kappa * Ktot)
 
 # Positivité : terme à seuil, nul tant que rho_pred >= EPS_POS * rho_cible et q_pred >= EPS_POS * q_cible,
 # avec q = rho * E - m^2 / 2 = rho * p / (gamma - 1) : si rho > 0, p > 0 <=> q > 0, et q est polynomial
-# (pas de division par un rho_pred proche de 0, gradient borné). Divisé par la moyenne de la cible ;
-# somme sur les cellules pour qu'une seule cellule fautive pèse. Invariant par la normalisation par V.
+# (pas de division par un rho_pred proche de 0). rho divisé par la moyenne de la cible ; q divisé par
+# q_cible de la cellule : une violation pèse autant dans une zone à basse pression (blast : q ~ 1e-5 x moyenne)
+# qu'ailleurs. Somme sur les cellules pour qu'une seule cellule fautive pèse. Invariant par la normalisation par (V, R).
 def loss_positivite(u_pred, u_cible):  # (batch, 3, n) chacun
     def rho_q(U):
         return U[:, 0], U[:, 0] * U[:, 2] - 0.5 * U[:, 1]**2
     rho_pred, q_pred = rho_q(u_pred)
     rho_cib,  q_cib  = rho_q(u_cible)
     viol_rho = jax.nn.relu(EPS_POS * rho_cib - rho_pred) / jnp.mean(rho_cib, axis=-1, keepdims=True)
-    viol_q   = jax.nn.relu(EPS_POS * q_cib - q_pred)     / jnp.mean(q_cib, axis=-1, keepdims=True)
+    viol_q   = jax.nn.relu(EPS_POS * q_cib - q_pred)     / q_cib   # local : relu(EPS_POS - q_pred / q_cib)
     return jnp.mean(jnp.sum(viol_rho + viol_q, axis=-1))
 
 
