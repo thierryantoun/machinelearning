@@ -186,6 +186,17 @@ def ic_ids_euler(key):
     return types, riemann, u_zero
 
 
+def keys_non_constantes(key, n):
+    """n clés dont la CI n'est pas entièrement constante (F = f(U) par consistance, loss nulle quels que
+    soient les poids -> aucun signal). Test sur le champ généré lui-même (pas sur l'étiquette : une famille
+    peut sortir constante, ex. marches dont tous les bords tombent après la dernière cellule).
+    Ne génère que les CI (pas de solveur). P(tout constant) ≈ 5 % : 2n clés candidates suffisent largement."""
+    keys = random.split(key, 2 * n)
+    U = jax.vmap(generate_initial_data_euler)(keys)                    # (2n, 3, N)
+    ok = jnp.any(jnp.max(U, axis=-1) - jnp.min(U, axis=-1) > 0, axis=1)
+    return keys[jnp.nonzero(ok, size=n)[0]]
+
+
 def generate_initial_data_euler(key):
     """U0 : (3, n), variables conservatives (rho, rho*u, E). Une forme indépendante par variable
     primitive ; l'exponentielle garantit rho > 0 et p > 0."""
@@ -212,7 +223,9 @@ def generate_initial_data_euler(key):
     # rho : f dans [-1.5, 1.5] -> rapports jusqu'à e^3 ≈ 20 (Sod : 8) ;
     # p   : f dans [-6, 6]     -> rapports jusqu'à e^12 ≈ 1.6e5 (blast : 1e5) ; u reste dans [-1, 1]
     AMP_RIEMANN = jnp.array([[1.5], [1.0], [1.5]])                      # (rho, u, p)
-    split     = random.uniform(k_split, (), minval=0.0, maxval=1.0)
+    # split dans [dx/2, x[-1]) : la cellule 0 est à gauche et la dernière à droite -> le saut existe toujours
+    # (avec [0, 1), split > x[-1] = 1 - dx mettait toutes les cellules à gauche : état constant, prob. 1/N)
+    split     = random.uniform(k_split, (), minval=0.5 * (x[1] - x[0]), maxval=x[-1])
     f_L       = AMP_RIEMANN * random.uniform(k_L, (3, 1), minval=-1.0, maxval=1.0)
     f_R       = AMP_RIEMANN * random.uniform(k_R, (3, 1), minval=-1.0, maxval=1.0)
     f_riemann = jnp.where(x < split, f_L, f_R)                          # (3, n)
