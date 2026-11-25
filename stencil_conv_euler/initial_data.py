@@ -222,7 +222,7 @@ def generate_initial_data_euler(key):
     # (par périodicité, un second saut en x = 0). Plage élargie pour rho et p seulement :
     # rho : f dans [-1.5, 1.5] -> rapports jusqu'à e^3 ≈ 20 (Sod : 8) ;
     # p   : f dans [-6, 6]     -> rapports jusqu'à e^12 ≈ 1.6e5 (blast : 1e5) ; u reste dans [-1, 1]
-    AMP_RIEMANN = jnp.array([[1.5], [1.0], [1.5]])                      # (rho, u, p)
+    AMP_RIEMANN = jnp.array([[1.5], [1.0], [6]])                      # (rho, u, p)
     # split dans [dx/2, x[-1]) : la cellule 0 est à gauche et la dernière à droite -> le saut existe toujours
     # (avec [0, 1), split > x[-1] = 1 - dx mettait toutes les cellules à gauche : état constant, prob. 1/N)
     split     = random.uniform(k_split, (), minval=0.5 * (x[1] - x[0]), maxval=x[-1])
