@@ -8,15 +8,15 @@ SOLVER = "euler"
 
 K          = 40   # nombre de fréquences des conditions initiales (initial_data.py), sans lien avec le réseau
 
-N_TRAJ         = 10000  # nombre de trajectoires longues
-MULTIPLE_STEPS = 10# nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
+N_TRAJ         = 150000  # nombre de trajectoires longues
+MULTIPLE_STEPS = 1# nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
-T          = 5  # temps physique final des rollouts à pas CFL adaptatif (test.py)
+T          = 0.1  # temps physique final des rollouts à pas CFL adaptatif (test.py)
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-LAMBDA     = 25.6              # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
+LAMBDA     = 10             # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
 
 # Taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la sortie du
 # réseau en dépendent. V n'est exact qu'au début du bloc : MARGE couvre la vitesse atteinte
@@ -31,7 +31,7 @@ n_batches  = N_TRAIN // batch_size
 lambda_hf   = 1.0
 PHYS_NORM   = "L1"  # norme de loss_phys : "L1" (sum|e| / sum|cible|, chocs moins étalés) ou "L2" (||e||_2 / ||cible||_2)
 lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
-lambda_pos  = 0.0   # ABLATION (baseline 0.1 dans pkl/baseline_lambda_pos_0.1/) ; poids de loss_pos (positivité de rho et p prédits) ; 0 pour la désactiver
+lambda_pos  = 1.0   # ABLATION (baseline 0.1 dans pkl/baseline_lambda_pos_0.1/) ; poids de loss_pos (positivité de rho et p prédits) ; 0 pour la désactiver
 EPS_POS     = 0.5   # marge : pénalise les cellules où rho_pred < EPS_POS * rho_cible (idem p)
 
 # ------------------------------------------------------------------

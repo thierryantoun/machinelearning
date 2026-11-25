@@ -17,12 +17,18 @@ def V_max(U):
     rho, u, p = primitives(U)
     return jnp.max(jnp.abs(u) + jnp.sqrt(gamma * p / rho))
 
-# (rho, m, E) -> (rho, m / V, E / V²) : u -> u / V, p -> p / V², et max(|u| + c) = 1 si V = V_max(U)
-def normalise(U, V):
-    return jnp.stack([U[0], U[1] / V, U[2] / V**2])
+# R = max_j rho_j, échelle de densité, un nombre par état
+def R_max(U):
+    return jnp.max(U[0])
 
-def denormalise(U, V):
-    return jnp.stack([U[0], U[1] * V, U[2] * V**2])
+# adimensionnement classique d'Euler (3 échelles : L = 1, rho_ref = R, u_ref = V ; p_ref = E_ref = R V²)
+# (rho, m, E) -> (rho / R, m / (R V), E / (R V²)) : rho -> rho / R, u -> u / V, p -> p / (R V²)
+# l'état normalisé reste un état d'Euler (même gamma), max(|u| + c) = 1 si V = V_max(U), max(rho) = 1 si R = R_max(U)
+def normalise(U, V, R):
+    return jnp.stack([U[0] / R, U[1] / (R * V), U[2] / (R * V**2)])
+
+def denormalise(U, V, R):
+    return jnp.stack([U[0] * R, U[1] * (R * V), U[2] * (R * V**2)])
 
 
 # F_{j+1/2} = flux(wb_L_j, wb_R_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
@@ -52,10 +58,11 @@ def T_bloc(U):
 # un bloc du réseau sur les vraies valeurs
 def bloc(params, U):
     V   = V_max(U)
-    U_t = normalise(U, V)
+    R   = R_max(U)
+    U_t = normalise(U, V, R)
     F_t = predict_F(params, U_t)
     U_t = U_t - LAMBDA * (F_t - jnp.roll(F_t, 1, axis=-1))
-    return denormalise(U_t, V), T_bloc(U)
+    return denormalise(U_t, V, R), T_bloc(U)
 
 
 # blocs du réseau tant qu'on ne dépasse pas T_final ; le réseau est entraîné à lambda fixe,
@@ -98,8 +105,9 @@ def loss_positivite(u_pred, u_cible):  # (batch, 3, n) chacun
 # u0s_batch, u_finals_batch : (batch, 3, n), vraies valeurs, u_final à T_bloc(u0) de u0
 def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
     Vs = jax.vmap(V_max)(u0s_batch)
-    u0s_batch      = jax.vmap(normalise)(u0s_batch, Vs)        # entrée et cible avec le même V, celui de l'entrée
-    u_finals_batch = jax.vmap(normalise)(u_finals_batch, Vs)
+    Rs = jax.vmap(R_max)(u0s_batch)
+    u0s_batch      = jax.vmap(normalise)(u0s_batch, Vs, Rs)        # entrée et cible avec les mêmes V, R, ceux de l'entrée
+    u_finals_batch = jax.vmap(normalise)(u_finals_batch, Vs, Rs)
     F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s_batch)
     u_pred = u0s_batch - LAMBDA * (F_pred - jnp.roll(F_pred, 1, axis=-1))
 
@@ -107,15 +115,12 @@ def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
     # norme L2 moyenne sur le batch, par variable : E ne domine pas rho, et rho*u peut être nul sur une trajectoire.
     # Sert aussi à loss_hf, quelle que soit PHYS_NORM (sinon l'échelle de loss_hf change d'un facteur ~sqrt(n))
     norme  = jnp.mean(jnp.sqrt(jnp.sum(u_finals_batch ** 2, axis=-1) + 1e-12), axis=0, keepdims=True)  # (1, 3)
-    if PHYS_NORM == "L1":
-        # L1 relative : régression vers la médiane, un choc décalé d'une cellule pèse moins -> moins d'étalement
-        erreur   = jnp.sum(jnp.abs(erreur_vec), axis=-1)                                              # (batch, 3)
-        norme_l1 = jnp.mean(jnp.sum(jnp.abs(u_finals_batch), axis=-1), axis=0, keepdims=True) + 1e-12  # (1, 3)
-        loss_phys = jnp.mean(erreur / norme_l1)
-    else:
-        erreur = jnp.sqrt(jnp.sum(erreur_vec ** 2, axis=-1) + 1e-12)  # (batch, 3)
-        loss_phys = jnp.mean(erreur / norme)
 
+    # L1 relative : régression vers la médiane, un choc décalé d'une cellule pèse moins -> moins d'étalement
+    erreur   = jnp.sum(jnp.abs(erreur_vec), axis=-1)                                              # (batch, 3)
+    norme_l1 = jnp.mean(jnp.sum(jnp.abs(u_finals_batch), axis=-1), axis=0, keepdims=True) + 1e-12  # (1, 3)
+    loss_phys = jnp.mean(erreur / norme_l1)
+   
     e_hat   = jnp.fft.rfft(erreur_vec, axis=-1)
     e_hf    = e_hat[..., k0:Ktot]
     loss_hf = 1 / (Ktot- k0) * jnp.mean(jnp.sum(jnp.abs(e_hf), axis=-1) / norme)
@@ -126,6 +131,25 @@ def _loss_stencil_conv1D(params, u0s_batch, u_finals_batch):
     return loss, {"loss": loss, "loss_phys": loss_phys, "loss_hf": loss_hf, "loss_pos": loss_pos}
 
 loss_fn = jax.jit(_loss_stencil_conv1D)
+
+# diagnostic : termes BRUTS de la loss pour chaque paire, sans la division par la norme moyenne du batch
+# (une norme par paire exploserait quand une composante est nulle, ex. u = 0 -> rho*u = 0 partout).
+# La division par la norme moyenne sur tout le jeu se fait après (training.print_losses_par_type).
+# (batch, 3, n) x2 -> dict de (batch, 3) : err_l1, norme_l1, hf, norme_l2 ; et loss_pos (batch,)
+def _termes_par_ci(params, u0, uf):
+    V  = V_max(u0)
+    R  = R_max(u0)
+    u0 = normalise(u0, V, R)
+    uf = normalise(uf, V, R)
+    F  = predict_F(params, u0)
+    e  = u0 - LAMBDA * (F - jnp.roll(F, 1, axis=-1)) - uf
+    return {"err_l1":   jnp.sum(jnp.abs(e), axis=-1),
+            "norme_l1": jnp.sum(jnp.abs(uf), axis=-1),
+            "hf":       jnp.sum(jnp.abs(jnp.fft.rfft(e, axis=-1)[..., k0:Ktot]), axis=-1) / (Ktot - k0),
+            "norme_l2": jnp.sqrt(jnp.sum(uf ** 2, axis=-1) + 1e-12),
+            "loss_pos": loss_positivite((uf + e)[None], uf[None])}
+
+termes_par_ci = jax.jit(jax.vmap(_termes_par_ci, in_axes=(None, 0, 0)))
 
 def make_train_step(optimizer):
     @jax.jit

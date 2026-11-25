@@ -15,7 +15,8 @@ from network_parameters import (
     ONPOLICY_ENABLED, ONPOLICY_TRAJ, ONPOLICY_MAX_STEPS, ONPOLICY_DEPTHS_PER_TRAJ, ONPOLICY_REGEN_EVERY,
     EPS_ADMISSIBLE,
 )
-from initial_data import generate_initial_data, generate_initial_data_euler, ic_types_euler
+from initial_data import generate_initial_data, generate_initial_data_euler, ic_types_euler, keys_non_constantes
+from diag_par_type import make_diag_set, print_losses_par_type
 from euler_solver import primitives, gamma
 from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc, bloc
 
@@ -47,7 +48,7 @@ N_VAL      = N_VAL_TRAJ * MULTIPLE_STEPS
 # calcul stencil max sur tout le jeu de données pour savoir quelles valeurs prendre pour p et q
 # vitesses normalisées par le V du début du bloc : dans [-1, 1] au début, peuvent dépasser à la fin
 def wave_speeds(U, V):
-    rho, u, p = primitives(normalise(U, V))
+    rho, u, p = primitives(normalise(U, V, 1.0))   # u et c ne dépendent pas de R
     c = jnp.sqrt(gamma * p / rho)
     return jnp.min(u - c), jnp.max(u + c)
 
@@ -129,15 +130,19 @@ def relabel_batch(us):
 
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
 
-u0s_traj, u_finals_traj, ts_traj, speeds_traj = jax.vmap(generate_trajectory)(random.split(key_traj_train, N_TRAJ))
+u0s_traj, u_finals_traj, ts_traj, speeds_traj = jax.vmap(generate_trajectory)(keys_non_constantes(key_traj_train, N_TRAJ))
 u0s_training      = u0s_traj.reshape(-1, 3, x.shape[0])
 u_finals_training = u_finals_traj.reshape(-1, 3, x.shape[0])
 ts_training       = ts_traj.reshape(-1)   # T_bloc(u), varie selon l'état, garde juste pour verification/log
 
-u0s_traj_val, u_finals_traj_val, ts_traj_val, speeds_traj_val = jax.vmap(generate_trajectory)(random.split(key_traj_val, N_VAL_TRAJ))
+u0s_traj_val, u_finals_traj_val, ts_traj_val, speeds_traj_val = jax.vmap(generate_trajectory)(keys_non_constantes(key_traj_val, N_VAL_TRAJ))
 u0s_validation      = u0s_traj_val.reshape(-1, 3, x.shape[0])
 u_finals_validation = u_finals_traj_val.reshape(-1, 3, x.shape[0])
 ts_validation       = ts_traj_val.reshape(-1)
+
+# Jeu de diagnostic : N_DIAG trajectoires étiquetées par type de CI, clé à part (fold_in) -> train/val inchangés
+N_DIAG = 2000
+diag_set = make_diag_set(random.fold_in(key, 2), N_DIAG)
 
 
 a_min = float(jnp.minimum(jnp.min(speeds_traj[0]), jnp.min(speeds_traj_val[0])))
@@ -348,6 +353,7 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
               f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker} | lr={lr_epoch:.2e}")
         if lr_dropped:
             print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
+        print_losses_par_type(params, diag_set)
         if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
             loss_log.write("\t".join(["epoch"] + [f"train_{k}" for k in metrics_train] + [f"val_{k}" for k in metrics_val] + ["lr"]) + "\n")
         loss_log.write("\t".join([str(epoch)] + [f"{float(v):.8e}" for v in [*metrics_train.values(), *metrics_val.values(), lr_epoch]]) + "\n")
