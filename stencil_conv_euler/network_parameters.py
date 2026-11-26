@@ -16,12 +16,12 @@ T          = 0.1  # temps physique final des rollouts à pas CFL adaptatif (test
 cfl        = 0.5
 a          = 1.0      # vitesse pour l'advection
 x          = jnp.linspace(0, 1, n, endpoint=False)
-LAMBDA     = 10             # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
+LAMBDA     = 1             # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
 
 # Taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la sortie du
 # réseau en dépendent. V n'est exact qu'au début du bloc : MARGE couvre la vitesse atteinte
 # pendant le bloc (cf. print de training.py). lambda=25.6, MARGE=1 -> P=25, Q=26 (52 cellules)
-MARGE      = 1.0
+MARGE      = 10.0
 Q          = math.ceil(MARGE * LAMBDA)
 P          = Q - 1
 batch_size = 128
@@ -33,6 +33,7 @@ PHYS_NORM   = "L1"  # norme de loss_phys : "L1" (sum|e| / sum|cible|, chocs moin
 lambda_phys = 1.0   # poids de loss_phys ; mettre à 0 pour l'exclure entièrement de la loss
 lambda_pos  = 1.0   # ABLATION (baseline 0.1 dans pkl/baseline_lambda_pos_0.1/) ; poids de loss_pos (positivité de rho et p prédits) ; 0 pour la désactiver
 EPS_POS     = 0.5   # marge : pénalise les cellules où rho_pred < EPS_POS * rho_cible (idem p)
+EPS_Q       = 1e-2  # plancher du dénominateur de la pénalité sur q : q_cible + EPS_Q * moyenne(q_cible) ; amplification max 1 / EPS_Q
 
 # ------------------------------------------------------------------
 # Entraînement "model-in-the-loop" (correction de l'exposure bias) :
