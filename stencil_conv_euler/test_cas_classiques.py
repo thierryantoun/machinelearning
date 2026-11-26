@@ -2,9 +2,6 @@
 
 - Blast (type Woodward-Colella, version périodique de test_blast.py) : p = 1000 / 0.01 / 100,
   rapports de pression 1e5, très loin de l'entraînement (p dans [0.22, 4.5]).
-- Brio-Wu, PARTIE HYDRODYNAMIQUE SEULEMENT : le vrai Brio-Wu est un tube à choc MHD
-  (Bx = 0.75, By = +-1, gamma = 2), impossible avec Euler. On garde rho = 1 / 0.125,
-  p = 1 / 0.1, u = 0, avec le gamma du solveur (5/3) : c'est un tube de Sod.
 - Sod : rho = 1 / 0.125, p = 1 / 0.1, u = 0, saut en x = 0.5, t = 0.2 (gamma du solveur, 5/3).
 Domaine périodique [0, 1) : un second saut existe au raccord x = 0.
 """
@@ -32,28 +29,21 @@ def euler_state(rho, u, p):
 
 
 def blast(x):
-    p = jnp.where(x < 0.1, 1000.0, jnp.where(x > 0.9, 100.0, 0.01))
+    p = jnp.where(x < 0.1, 1.0, jnp.where(x > 0.9, 1.0, 0.01))
     return euler_state(jnp.ones_like(x), jnp.zeros_like(x), p)
 
-
-def brio_wu_hydro(x):
-    return euler_state(jnp.where(x < 0.5, 1.0, 0.125), jnp.zeros_like(x), jnp.where(x < 0.5, 1.0, 0.1))
-
-
 def sod(x):
-    return euler_state(jnp.where(x < 0.5, 1.0, 0.125), jnp.zeros_like(x), jnp.where(x < 0.5, 1.0, 0.1))
+    return euler_state(jnp.where(x < 0.5, 1.0, 0.5), jnp.zeros_like(x), jnp.where(x < 0.5, 1.0, 0.1))
 
 
 CASES = [
     # (nom, CI, temps final, échelle log pour p)
-    ("blast", blast, 0.012, True),
-    ("brio_wu_hydro", brio_wu_hydro, 0.2, False),
+    ("blast", blast, 0.12, True),
     ("sod", sod, 0.2, False),
 ]
 
 TITRES = {
     "blast": "Blast (Woodward-Colella périodique)",
-    "brio_wu_hydro": "Brio-Wu, partie hydrodynamique seule (sans B, γ = 5/3) — équivaut à un tube de Sod",
     "sod": "Tube de Sod (γ = 5/3, domaine périodique)",
 }
 

@@ -52,5 +52,19 @@ class stencil_conv1D(nn.Module):
         bias   = self.lifting.variables["params"]["bias"]     # (dv,)
         return self._head(c.T @ jnp.sum(kernel, axis=0) + bias)
 
+    # W : (n, p+q+1, 3) fenêtres déjà extraites (cellules j-p .. j+q de la face j+1/2), normalisées et masquées
+    # (zéros hors du cône local) -> N, (3, n). Même noyau que __call__ : conv VALID de longueur p+q+1 = sum_k W[k] K[k] + b,
+    # donc zéros hors cône = noyau tronqué au cône
+    def fenetres(self, W):
+        return self._head(self.lifting(W)[:, 0, :])
+
+    # c : (3, n), masque : (n, p+q+1) cône local de chaque face -> N sur la fenêtre constante (c_j, ..., c_j) masquée
+    # par le même cône : c_j @ sum_{k dans le cône j} kernel[k] + bias. Même masque que fenetres -> N - N_bar = 0 si fenêtre constante
+    def constant_masque(self, c, masque):
+        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 3, dv)
+        bias   = self.lifting.variables["params"]["bias"]     # (dv,)
+        K_cone = jnp.einsum("nk,kcd->ncd", masque.astype(kernel.dtype), kernel)   # (n, 3, dv)
+        return self._head(jnp.einsum("cn,ncd->nd", c, K_cone) + bias)
+
 
 model = stencil_conv1D(activation=nn.gelu, dv=300, n_blocks=3)   # dv >= 3*(P+Q+1) = 156 : plus de directions de la fenêtre invisibles au lifting

@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from network import model, stencil_conv1D
-from network_parameters import a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, lambda_pos, EPS_POS, PHYS_NORM, LAMBDA, P, Q
+from network_parameters import a, cfl, SOLVER, MODEL, n, lambda_hf, lambda_phys, lambda_pos, EPS_POS, PHYS_NORM, LAMBDA, P, Q, MARGE
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -31,9 +31,41 @@ def denormalise(U, V, R):
     return jnp.stack([U[0] * R, U[1] * (R * V), U[2] * (R * V**2)])
 
 
+# Échelles par stencil. Fenêtre maximale de la face j+1/2 : cellules j-P .. j+Q (k = -P .. Q), indices périodiques (n, P+Q+1)
+K_FEN = jnp.arange(-P, Q + 1)
+
+def indices_fenetres(nx):
+    return (jnp.arange(nx)[:, None] + K_FEN[None, :]) % nx
+
+# |u| + c par cellule, (n,)
+def vitesses(U):
+    rho, u, p = primitives(U)
+    return jnp.abs(u) + jnp.sqrt(gamma * p / rho)
+
+# cône local de la face j+1/2 : lambda_loc = LAMBDA * V_fen / V_max(U) cellules parcourues par l'onde locale la plus rapide
+# pendant le bloc (V_fen : max de |u| + c sur la fenêtre maximale) -> q_loc = ceil(MARGE * lambda_loc) dans [1, Q],
+# p_loc = q_loc - 1 ; masque (n, P+Q+1) vrai sur k = -p_loc .. q_loc. lambda_loc < 1 -> 2 cellules (j, j+1)
+def masque_cone(U):
+    idx   = indices_fenetres(U.shape[-1])
+    a     = vitesses(U)
+    V_fen = jnp.max(a[idx], axis=-1)                                   # (n,)
+    lambda_loc = LAMBDA * V_fen / jnp.max(a)
+    q_loc = jnp.clip(jnp.ceil(MARGE * lambda_loc), 1, Q).astype(jnp.int32)
+    return (K_FEN[None, :] >= 1 - q_loc[:, None]) & (K_FEN[None, :] <= q_loc[:, None])
+
+# V_loc = max de |u| + c et R_loc = max de rho sur le cône local de chaque face, (n,) chacun
+def V_R_loc(U, masque):
+    idx = indices_fenetres(U.shape[-1])
+    V_loc = jnp.max(jnp.where(masque, vitesses(U)[idx], 0.0), axis=-1)
+    R_loc = jnp.max(jnp.where(masque, U[0][idx], 0.0), axis=-1)
+    return V_loc, R_loc
+
+
 # F_{j+1/2} = flux(wb_L_j, wb_R_j) + N[w_j] - N[wb_j], N[wb_j] évalué sur la fenêtre constante (wb_j, ..., wb_j)
 # fenêtre j constante -> w_j = wb_L_j = wb_R_j = wb_j -> F = f(wb_j), quels que soient les poids
 def predict_F(params, U0):
+    if SOLVER == "euler":
+        return predict_F_local(params, U0)
     nx    = U0.shape[-1]
     S     = jnp.concatenate([jnp.zeros((3, 1)), jnp.cumsum(jnp.pad(U0, ((0, 0), (P, Q)), mode="wrap"), axis=-1)], axis=-1)  # (3, n+P+Q+1)
     wb    = (S[:, P + Q + 1:] - S[:, :nx]) / (P + Q + 1)     # moyenne sur chaque stencil sans construire la grosse matrice
@@ -48,6 +80,28 @@ def predict_F(params, U0):
     else:
         consistance = flux(wb_L, wb_R)
     return consistance + N - N_bar
+
+
+# Euler, stencil local par face j+1/2 : cône k = -p_loc .. q_loc (masque_cone), normalisé par (V_loc, R_loc) du cône.
+# F = flux(wb_L, wb_R) + (R V, R V², R V³)_loc * (N[w_loc] - N[wb_loc]), moyennes wb, wb_L, wb_R sur le cône seul.
+# U0 et F dans les unités de U0 (normalisation globale du bloc) ; fenêtre constante sur le cône -> N = N_bar -> F = f(wb)
+def predict_F_local(params, U0):
+    idx    = indices_fenetres(U0.shape[-1])
+    masque = masque_cone(U0)                                 # (n, P+Q+1)
+    V, R   = V_R_loc(U0, masque)                             # (n,) chacun
+    ech    = jnp.stack([R, R * V, R * V**2])                 # (3, n) échelles de (rho, m, E) par face
+    W      = U0[:, idx]                                      # (3, n, P+Q+1) fenêtres maximales
+    M      = masque.astype(U0.dtype)
+    M_L    = M * (K_FEN <= 0)                                # j-p_loc .. j, à gauche de la face
+    M_R    = M * (K_FEN >= 1)                                # j+1 .. j+q_loc, à droite
+    wb     = jnp.sum(W * M,   axis=-1) / jnp.sum(M,   axis=-1)
+    wb_L   = jnp.sum(W * M_L, axis=-1) / jnp.sum(M_L, axis=-1)
+    wb_R   = jnp.sum(W * M_R, axis=-1) / jnp.sum(M_R, axis=-1)
+    W_loc  = W / ech[:, :, None] * M                         # normalisées par face, zéros hors du cône
+    N      = model.apply(params, jnp.transpose(W_loc, (1, 2, 0)), method=stencil_conv1D.fenetres)
+    N_bar  = model.apply(params, wb / ech, masque, method=stencil_conv1D.constant_masque)
+    ech_F  = jnp.stack([R * V, R * V**2, R * V**3])          # échelles des flux de masse, quantité de mouvement, énergie
+    return flux(wb_L, wb_R) + ech_F * (N - N_bar)
 
 
 # durée d'un bloc : T = LAMBDA * dx / V, quelle que soit la grille de U
