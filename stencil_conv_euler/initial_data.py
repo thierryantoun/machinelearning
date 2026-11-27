@@ -190,11 +190,21 @@ def keys_non_constantes(key, n):
     """n clés dont la CI n'est pas entièrement constante (F = f(U) par consistance, loss nulle quels que
     soient les poids -> aucun signal). Test sur le champ généré lui-même (pas sur l'étiquette : une famille
     peut sortir constante, ex. marches dont tous les bords tombent après la dernière cellule).
-    Ne génère que les CI (pas de solveur). P(tout constant) ≈ 5 % : 2n clés candidates suffisent largement."""
+    Ne génère que les CI (pas de solveur). P(tout constant) ≈ 5 % : 2n clés candidates suffisent largement.
+    Par morceaux de CHUNK_CI : sous vmap, le lax.switch de generate_initial_data calcule les 10 familles,
+    les 2n CI d'un coup font un pic de dizaines de Go (2n = 5e5 -> ~40 Go). Mêmes clés retenues qu'en un seul vmap."""
     keys = random.split(key, 2 * n)
-    U = jax.vmap(generate_initial_data_euler)(keys)                    # (2n, 3, N)
-    ok = jnp.any(jnp.max(U, axis=-1) - jnp.min(U, axis=-1) > 0, axis=1)
+    ok = jnp.concatenate([_ci_non_constante(keys[i:i + CHUNK_CI]) for i in range(0, keys.shape[0], CHUNK_CI)])
     return keys[jnp.nonzero(ok, size=n)[0]]
+
+
+CHUNK_CI = 50000
+
+# (m,) clés -> (m,) bool : CI non entièrement constante
+@jax.jit
+def _ci_non_constante(keys):
+    U = jax.vmap(generate_initial_data_euler)(keys)                    # (m, 3, N)
+    return jnp.any(jnp.max(U, axis=-1) - jnp.min(U, axis=-1) > 0, axis=1)
 
 
 def generate_initial_data_euler(key):
