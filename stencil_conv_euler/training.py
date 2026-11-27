@@ -17,7 +17,8 @@ from network_parameters import (
 )
 from initial_data import generate_initial_data, generate_initial_data_euler, ic_types_euler, keys_non_constantes
 from euler_solver import primitives, gamma
-from loss import model, loss_fn, make_train_step, predict_F, V_max, normalise, T_bloc, bloc
+from loss import model, loss_fn, make_train_step, predict_F, V_max, R_max, normalise, T_bloc, bloc
+from network_parameters import lambda_phys, lambda_hf
 
 if SOLVER == "advection":
     from advection_solver import advection_solver as _solver
@@ -257,6 +258,28 @@ def eval_losses(params, u0s, u_finals, n_batches_eval):
     return {k: v / n_batches_eval for k, v in totals.items()}
 
 
+# diagnostic seul (hors gradient, loss inchangée) : cellules où la prédiction d'un bloc sort du domaine physique,
+# même calcul de u_pred que _loss_stencil_conv1D. p < 0 compté là où rho > 0 (q = rho p / (gamma - 1) < 0)
+@jax.jit
+def _non_physique(params, u0s):
+    Vs, Rs = jax.vmap(V_max)(u0s), jax.vmap(R_max)(u0s)
+    u0s    = jax.vmap(normalise)(u0s, Vs, Rs)
+    F_pred = jax.vmap(lambda u: predict_F(params, u))(u0s)
+    u_pred = u0s - LAMBDA * (F_pred - jnp.roll(F_pred, 1, axis=-1))
+    rho, q = u_pred[:, 0], u_pred[:, 0] * u_pred[:, 2] - 0.5 * u_pred[:, 1]**2
+    rho_neg, p_neg = rho < 0, (rho > 0) & (q < 0)
+    return jnp.sum(rho_neg), jnp.sum(p_neg), jnp.sum(jnp.any(rho_neg | p_neg, axis=-1))
+
+def print_non_physique(params, u0s, n_batches_eval, etiquette):
+    n_rho, n_p, n_ci = 0, 0, 0
+    for i in range(n_batches_eval):
+        sl = slice(i * batch_size, (i + 1) * batch_size)
+        a, b, c = _non_physique(params, u0s[sl])
+        n_rho, n_p, n_ci = n_rho + int(a), n_p + int(b), n_ci + int(c)
+    print(f"  {etiquette} non physique : rho<0 dans {n_rho} cellules, p<0 dans {n_p} cellules "
+          f"(sur {n_batches_eval * batch_size} × {u0s.shape[-1]}), {n_ci} CI touchées")
+
+
 if os.path.exists(CHECKPOINT_PATH):
     with open(CHECKPOINT_PATH, "rb") as f:
         ckpt = pickle.load(f)
@@ -348,10 +371,13 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
         metrics_val   = eval_losses(params, u0s_validation, u_finals_validation, n_batches_val)
         loss_train = metrics_train["loss"]
         loss_val   = metrics_val["loss"]
+        # critère de sélection et de plateau : précision seule (loss_phys + loss_hf pondérées), sans loss_pos,
+        # dominée par quelques cellules proches du vide et trop bruitée en val. loss_pos reste dans la loss d'entraînement
+        crit_val = lambda_phys * metrics_val["loss_phys"] + lambda_hf * metrics_val["loss_hf"]
 
-        improved = loss_val < best_val
+        improved = crit_val < best_val
         if improved:
-            best_val = float(loss_val)
+            best_val = float(crit_val)
             best_params = params
             epochs_no_improve = 0
         else:
@@ -368,7 +394,9 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
         detail_val   = " ".join(f"{k}={v:.6f}" for k, v in metrics_val.items() if k != "loss")
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
-              f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker} | lr={lr_epoch:.2e}")
+              f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''} | critère val (phys+hf)={crit_val:.6f}{marker}"
+              f" | lr={lr_epoch:.2e}")
+        print_non_physique(params, u0s_validation, n_batches_val, "Val")
         print_memoire(f"epoch {epoch}")
         if lr_dropped:
             print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
