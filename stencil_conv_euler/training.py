@@ -347,6 +347,11 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
               f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker} | lr={lr_epoch:.2e}")
+        # mémoire GPU réellement utilisée par JAX (nvidia-smi montre la préallocation de 75 %, pas l'usage) ; None sur CPU
+        mem = jax.devices()[0].memory_stats() or {}
+        if "bytes_limit" in mem:
+            print(f"  Mémoire GPU : pic {mem['peak_bytes_in_use'] / 2**30:.2f} Go / {mem['bytes_limit'] / 2**30:.2f} Go "
+                  f"({100 * mem['peak_bytes_in_use'] / mem['bytes_limit']:.1f} %), batch_size={batch_size}, N_TRAJ={N_TRAJ}")
         if lr_dropped:
             print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
         if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
