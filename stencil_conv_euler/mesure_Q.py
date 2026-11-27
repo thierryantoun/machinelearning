@@ -50,11 +50,11 @@ if N_va > 0:
     keys = jnp.concatenate([keys, keys_non_constantes(key_traj_val, N_va)])
 
 print(f"{keys.shape[0]} CI, {MULTIPLE_STEPS} bloc(s) par CI, n={n}, Q actuel (network_parameters) = {Q}")
-print("vitesse CFL = max(|u| + s_ac) du solveur (majorant) ; physique = max(|u| + c) (cône physique)")
-print(f"{'LAMBDA':>7} {'vitesse':>9} {'dist max':>9} {'99.9 %':>8} {'99 %':>8} {'médiane':>8} {'Q - LAMBDA':>11} {'Q conseillé':>12}")
+print("distance avec la vitesse physique max(|u| + c) (cône physique)")
+print(f"{'LAMBDA':>7} {'dist max':>9} {'99.9 %':>8} {'99 %':>8} {'médiane':>8} {'Q - LAMBDA':>11} {'Q conseillé':>12}")
 for lam in LAMBDAS:
     D = jnp.concatenate([_dist_chunk(keys[i:i + CHUNK], lam) for i in range(0, keys.shape[0], CHUNK)]).reshape(-1, 2)
-    for nom, d in (("CFL", D[:, 0]), ("physique", D[:, 1])):
-        q999, q99, q50 = (float(v) for v in jnp.quantile(d, jnp.array([0.999, 0.99, 0.5])))
-        Q_cons = math.ceil(float(jnp.max(d)))
-        print(f"{lam:7g} {nom:>9} {float(jnp.max(d)):9.2f} {q999:8.2f} {q99:8.2f} {q50:8.2f} {Q_cons - lam:11g} {Q_cons:12d}")
+    d = D[:, 1]   # dist[1] : vitesse physique
+    q999, q99, q50 = (float(v) for v in jnp.quantile(d, jnp.array([0.999, 0.99, 0.5])))
+    Q_cons = math.ceil(float(jnp.max(d)))
+    print(f"{lam:7g} {float(jnp.max(d)):9.2f} {q999:8.2f} {q99:8.2f} {q50:8.2f} {Q_cons - lam:11g} {Q_cons:12d}")

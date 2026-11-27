@@ -19,10 +19,11 @@ x          = jnp.linspace(0, 1, n, endpoint=False)
 LAMBDA     = 1             # lambda = T * V / dx fixé, en cellules : l'onde la plus rapide parcourt LAMBDA cellules par bloc
 
 # Taille de la fenêtre (cône de dépendance, §3.4 du doc), fixe car l'entrée et la sortie du
-# réseau en dépendent. V n'est exact qu'au début du bloc : MARGE couvre la vitesse atteinte
-# pendant le bloc (cf. print de training.py). lambda=25.6, MARGE=1 -> P=25, Q=26 (52 cellules)
+# réseau en dépendent. V n'est exact qu'au début du bloc : MARGE, en cellules, s'ajoute à LAMBDA
+# pour couvrir la distance réellement parcourue pendant le bloc (mesurée par mesure_Q.py : MARGE = Q conseillé - LAMBDA).
+# Fenêtre de 2Q cellules : Q à gauche de la face (j-P..j) et Q à droite. LAMBDA=26, MARGE=6 -> P=31, Q=32 (64 cellules)
 MARGE      = 10.0
-Q          = math.ceil(MARGE * LAMBDA)
+Q          = math.ceil(LAMBDA + MARGE)
 P          = Q - 1
 batch_size = 128
 nb_epoch   = 710   # plafond de sécurité par run (compté depuis l'epoch de reprise) : l'arrêt normal vient de MIN_LR (training.py)
