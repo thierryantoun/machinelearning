@@ -43,14 +43,14 @@ def vitesses(U):
     return jnp.abs(u) + jnp.sqrt(gamma * p / rho)
 
 # cône local de la face j+1/2 : lambda_loc = LAMBDA * V_fen / V_max(U) cellules parcourues par l'onde locale la plus rapide
-# pendant le bloc (V_fen : max de |u| + c sur la fenêtre maximale) -> q_loc = ceil(MARGE * lambda_loc) dans [1, Q],
-# p_loc = q_loc - 1 ; masque (n, P+Q+1) vrai sur k = -p_loc .. q_loc. lambda_loc < 1 -> 2 cellules (j, j+1)
+# pendant le bloc (V_fen : max de |u| + c sur la fenêtre maximale) -> q_loc = ceil(lambda_loc + MARGE) dans [1, Q]
+# (MARGE en cellules, comme pour Q = ceil(LAMBDA + MARGE)), p_loc = q_loc - 1 ; masque (n, P+Q+1) vrai sur k = -p_loc .. q_loc
 def masque_cone(U):
     idx   = indices_fenetres(U.shape[-1])
     a     = vitesses(U)
     V_fen = jnp.max(a[idx], axis=-1)                                   # (n,)
     lambda_loc = LAMBDA * V_fen / jnp.max(a)
-    q_loc = jnp.clip(jnp.ceil(MARGE * lambda_loc), 1, Q).astype(jnp.int32)
+    q_loc = jnp.clip(jnp.ceil(lambda_loc + MARGE), 1, Q).astype(jnp.int32)
     return (K_FEN[None, :] >= 1 - q_loc[:, None]) & (K_FEN[None, :] <= q_loc[:, None])
 
 # V_loc = max de |u| + c et R_loc = max de rho sur le cône local de chaque face, (n,) chacun

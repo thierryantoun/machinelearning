@@ -165,9 +165,9 @@ print_memoire("après génération des données")
 
 a_min = float(jnp.minimum(jnp.min(speeds_traj[0]), jnp.min(speeds_traj_val[0])))
 a_max = float(jnp.maximum(jnp.max(speeds_traj[1]), jnp.max(speeds_traj_val[1])))
-marge = max(-a_min, a_max)
+cellules = math.ceil(max(-a_min, a_max) * LAMBDA)   # estimation grossière (vitesse de fin de bloc sur tout le bloc) ; mesure_Q.py est plus précis
 print(f"Vitesses normalisées en fin de bloc : a_min={a_min:.4f}, a_max={a_max:.4f}, lambda={LAMBDA:g} "
-      f"-> MARGE={marge:.4f}, {math.ceil(marge * LAMBDA)} cellules de chaque côté (réseau : {Q})")
+      f"-> {cellules} cellules de chaque côté, MARGE={cellules - LAMBDA:g} cellules (réseau : Q={Q})")
 
 assert u0s_training.shape[0] == N_TRAIN
 n_batches     = max(1, N_TRAIN // batch_size)
