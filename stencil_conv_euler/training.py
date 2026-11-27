@@ -127,17 +127,39 @@ def relabel_batch(us):
     return jax.vmap(lambda u: _solver(u, T_bloc(u))[0])(us)
 
 
+def print_memoire(etiquette):
+    """Pic de mémoire GPU réellement utilisé par JAX depuis le lancement (nvidia-smi montre la préallocation
+    de 75 %, pas l'usage). memory_stats() vaut None sur CPU : rien n'est affiché."""
+    mem = jax.devices()[0].memory_stats() or {}
+    if "bytes_limit" in mem:
+        print(f"  Mémoire GPU ({etiquette}) : pic {mem['peak_bytes_in_use'] / 2**30:.2f} Go / {mem['bytes_limit'] / 2**30:.2f} Go "
+              f"({100 * mem['peak_bytes_in_use'] / mem['bytes_limit']:.1f} %), en cours {mem['bytes_in_use'] / 2**30:.2f} Go, "
+              f"batch_size={batch_size}, N_TRAJ={N_TRAJ}")
+
+
+# génération par morceaux : le solveur vmappé sur toutes les trajectoires d'un coup a des temporaires ~ N_TRAJ
+# (OOM au-delà de quelques 1e5) ; par morceaux, le pic de la génération ne dépend que de CHUNK_TRAJ.
+# Mêmes clés -> mêmes données qu'en un seul vmap
+CHUNK_TRAJ = 50000
+_generate_chunk = jax.jit(jax.vmap(generate_trajectory))
+
+def generate_trajectories(keys):
+    morceaux = [_generate_chunk(keys[i:i + CHUNK_TRAJ]) for i in range(0, keys.shape[0], CHUNK_TRAJ)]
+    return jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *morceaux)
+
+
 key_train, key_traj_train, key_traj_val = random.split(key_train, 3)
 
-u0s_traj, u_finals_traj, ts_traj, speeds_traj = jax.vmap(generate_trajectory)(keys_non_constantes(key_traj_train, N_TRAJ))
+u0s_traj, u_finals_traj, ts_traj, speeds_traj = generate_trajectories(keys_non_constantes(key_traj_train, N_TRAJ))
 u0s_training      = u0s_traj.reshape(-1, 3, x.shape[0])
 u_finals_training = u_finals_traj.reshape(-1, 3, x.shape[0])
 ts_training       = ts_traj.reshape(-1)   # T_bloc(u), varie selon l'état, garde juste pour verification/log
 
-u0s_traj_val, u_finals_traj_val, ts_traj_val, speeds_traj_val = jax.vmap(generate_trajectory)(keys_non_constantes(key_traj_val, N_VAL_TRAJ))
+u0s_traj_val, u_finals_traj_val, ts_traj_val, speeds_traj_val = generate_trajectories(keys_non_constantes(key_traj_val, N_VAL_TRAJ))
 u0s_validation      = u0s_traj_val.reshape(-1, 3, x.shape[0])
 u_finals_validation = u_finals_traj_val.reshape(-1, 3, x.shape[0])
 ts_validation       = ts_traj_val.reshape(-1)
+print_memoire("après génération des données")
 
 
 
@@ -347,11 +369,7 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
         marker = " *" if improved else ""
         print(f"Epoch {epoch} | Train: {loss_train:.6f}{' (' + detail_train + ')' if detail_train else ''}"
               f" | Val: {loss_val:.6f}{' (' + detail_val + ')' if detail_val else ''}{marker} | lr={lr_epoch:.2e}")
-        # mémoire GPU réellement utilisée par JAX (nvidia-smi montre la préallocation de 75 %, pas l'usage) ; None sur CPU
-        mem = jax.devices()[0].memory_stats() or {}
-        if "bytes_limit" in mem:
-            print(f"  Mémoire GPU : pic {mem['peak_bytes_in_use'] / 2**30:.2f} Go / {mem['bytes_limit'] / 2**30:.2f} Go "
-                  f"({100 * mem['peak_bytes_in_use'] / mem['bytes_limit']:.1f} %), batch_size={batch_size}, N_TRAJ={N_TRAJ}")
+        print_memoire(f"epoch {epoch}")
         if lr_dropped:
             print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
         if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
