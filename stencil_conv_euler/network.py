@@ -54,9 +54,12 @@ class stencil_conv1D(nn.Module):
 
     # W : (n, p+q+1, 3) fenêtres déjà extraites (cellules j-p .. j+q de la face j+1/2), normalisées et masquées
     # (zéros hors du cône local) -> N, (3, n). Même noyau que __call__ : conv VALID de longueur p+q+1 = sum_k W[k] K[k] + b,
-    # donc zéros hors cône = noyau tronqué au cône
+    # donc zéros hors cône = noyau tronqué au cône. Écrit en einsum (produit matriciel) et non via nn.Conv :
+    # n * batch mini-signaux de longueur p+q+1 -> autotuning cuDNN qui demande des dizaines de Go d'espace de travail
     def fenetres(self, W):
-        return self._head(self.lifting(W)[:, 0, :])
+        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 3, dv)
+        bias   = self.lifting.variables["params"]["bias"]     # (dv,)
+        return self._head(jnp.einsum("nkc,kcd->nd", W, kernel) + bias)
 
     # c : (3, n), masque : (n, p+q+1) cône local de chaque face -> N sur la fenêtre constante (c_j, ..., c_j) masquée
     # par le même cône : c_j @ sum_{k dans le cône j} kernel[k] + bias. Même masque que fenetres -> N - N_bar = 0 si fenêtre constante
