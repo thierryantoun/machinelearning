@@ -62,12 +62,18 @@ class stencil_conv1D(nn.Module):
         return self._head(jnp.einsum("nkc,kcd->nd", W, kernel) + bias)
 
     # c : (3, n), masque : (n, p+q+1) cône local de chaque face -> N sur la fenêtre constante (c_j, ..., c_j) masquée
-    # par le même cône : c_j @ sum_{k dans le cône j} kernel[k] + bias. Même masque que fenetres -> N - N_bar = 0 si fenêtre constante
+    # par le même cône : c_j @ sum_{k dans le cône j} kernel[k] + bias. Même masque que fenetres -> N - N_bar = 0 si fenêtre constante.
+    # Le cône k = 1-q_loc .. q_loc ne dépend que de q_loc (masque_cone, loss.py) : les noyaux sommés K_cum[q], q = 0..Q,
+    # se calculent une fois (sommes cumulées, (Q+1, 3, dv)) au lieu d'une somme sur la fenêtre par face
     def constant_masque(self, c, masque):
-        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 3, dv)
+        kernel = self.lifting.variables["params"]["kernel"]   # (p+q+1, 3, dv), indice i = k + p
         bias   = self.lifting.variables["params"]["bias"]     # (dv,)
-        K_cone = jnp.einsum("nk,kcd->ncd", masque.astype(kernel.dtype), kernel)   # (n, 3, dv)
-        return self._head(jnp.einsum("cn,ncd->nd", c, K_cone) + bias)
+        S = jnp.concatenate([jnp.zeros_like(kernel[:1]), jnp.cumsum(kernel, axis=0)])   # S[i] = sum_{i' < i} kernel[i']
+        q = jnp.arange(self.q + 1)
+        K_cum = S[self.p + q + 1] - S[jnp.maximum(self.p + 1 - q, 0)]   # (Q+1, 3, dv) : somme sur i = p+1-q .. p+q
+        K_cum = K_cum.at[0].set(0.0)                                     # q = 0 : cône vide
+        q_loc = jnp.sum(masque, axis=-1) // 2                            # le masque garde 2 q_loc cellules
+        return self._head(jnp.sum(c.T[:, :, None] * K_cum[q_loc], axis=1) + bias)
 
 
 model = stencil_conv1D(activation=nn.gelu, dv=300, n_blocks=3)   # dv >= 3*(P+Q+1) = 156 : plus de directions de la fenêtre invisibles au lifting
