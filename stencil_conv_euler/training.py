@@ -182,9 +182,7 @@ print(f"T * V / dx (facteur d'amplification, fixe) : {LAMBDA:.2f}")
 # optimiseur
 PEAK_LR       = 5e-4
 WARMUP_EPOCHS = 5
-LR_PATIENCE   = 20     # epochs sans amélioration de la val avant de baisser le LR (multiple de 10 : éval toutes les 10 epochs)
-LR_FACTOR     = 0.5
-MIN_LR        = 1e-6   # arrêt du training quand le LR passe sous ce seuil
+MIN_LR        = 1e-6   # LR final du cosine decay : warmup puis cosinus de PEAK_LR à MIN_LR sur nb_epoch epochs depuis le début du stage
 RESUME_LR     = None   # LR d'un nouveau stage (NEW_STAGE) ; None = PEAK_LR
 WEIGHT_DECAY  = 1e-3
 
@@ -339,8 +337,18 @@ loss_log = open(LOSS_LOG_PATH, "w")
 
 # warmup au début d'un entraînement neuf ou d'un nouveau stage ; pas de warmup pour une simple reprise
 warmup_start = start_epoch if (start_epoch == 0 or NEW_STAGE) else None
+# début du stage : origine du warmup et du cosine ; une simple reprise continue le cosine du stage en cours
+debut_stage = start_epoch if warmup_start is not None else ckpt.get("debut_stage", start_epoch)
 
-for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond pour CE run
+def lr_cosine(epoch):
+    "warmup linéaire sur WARMUP_EPOCHS, puis cosinus de lr_current (pic du stage) à MIN_LR à l'epoch debut_stage + nb_epoch"
+    s = epoch - debut_stage
+    if warmup_start is not None and s < WARMUP_EPOCHS:
+        return lr_current * (s + 1) / WARMUP_EPOCHS
+    frac = min(1.0, (s - WARMUP_EPOCHS) / max(1, nb_epoch - WARMUP_EPOCHS))
+    return MIN_LR + 0.5 * (lr_current - MIN_LR) * (1.0 + math.cos(math.pi * frac))
+
+for epoch in range(start_epoch, debut_stage + nb_epoch):   # nb_epoch : durée du stage (fin du cosine)
     if ONPOLICY_ENABLED and epoch % ONPOLICY_REGEN_EVERY == 0:
         key_train, key_onpolicy = random.split(key_train)
         (u0s_onpolicy, u_finals_onpolicy, n_bad_onpolicy, n_valid_mean,
@@ -354,9 +362,7 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
         N_epoch         = u0s_epoch.shape[0]
         n_batches_epoch = max(1, N_epoch // batch_size)
 
-    # warmup linéaire par epoch, puis le LR courant (modifié par le plateau plus bas)
-    in_warmup = warmup_start is not None and epoch - warmup_start < WARMUP_EPOCHS
-    lr_epoch = lr_current * (epoch - warmup_start + 1) / WARMUP_EPOCHS if in_warmup else lr_current
+    lr_epoch = lr_cosine(epoch)
     opt_state = set_lr(opt_state, lr_epoch)
 
     key_train, subkey = random.split(key_train)
@@ -371,7 +377,7 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
         metrics_val   = eval_losses(params, u0s_validation, u_finals_validation, n_batches_val)
         loss_train = metrics_train["loss"]
         loss_val   = metrics_val["loss"]
-        # critère de sélection et de plateau : précision seule (loss_phys + loss_hf pondérées), sans loss_pos,
+        # critère de sélection du meilleur modèle : précision seule (loss_phys + loss_hf pondérées), sans loss_pos,
         # dominée par quelques cellules proches du vide et trop bruitée en val. loss_pos reste dans la loss d'entraînement
         crit_val = lambda_phys * metrics_val["loss_phys"] + lambda_hf * metrics_val["loss_hf"]
 
@@ -381,14 +387,7 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
             best_params = params
             epochs_no_improve = 0
         else:
-            epochs_no_improve += 10
-
-        # reduce-on-plateau (après le warmup) : epochs_no_improve compte depuis la dernière amélioration ou baisse du LR
-        lr_dropped = False
-        if not in_warmup and epochs_no_improve >= LR_PATIENCE:
-            lr_current *= LR_FACTOR
-            epochs_no_improve = 0
-            lr_dropped = True
+            epochs_no_improve += 10   # informatif seulement : le LR suit le cosine, pas la val
 
         detail_train = " ".join(f"{k}={v:.6f}" for k, v in metrics_train.items() if k != "loss")
         detail_val   = " ".join(f"{k}={v:.6f}" for k, v in metrics_val.items() if k != "loss")
@@ -398,8 +397,6 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
               f" | lr={lr_epoch:.2e}")
         print_non_physique(params, u0s_validation, n_batches_val, "Val")
         print_memoire(f"epoch {epoch}")
-        if lr_dropped:
-            print(f"  ↓ Plateau depuis {LR_PATIENCE} epochs : LR → {lr_current:.2e}")
         if loss_log.tell() == 0:   # en-tête à la 1re écriture : noms des métriques renvoyées par loss_fn
             loss_log.write("\t".join(["epoch"] + [f"train_{k}" for k in metrics_train] + [f"val_{k}" for k in metrics_val] + ["lr"]) + "\n")
         loss_log.write("\t".join([str(epoch)] + [f"{float(v):.8e}" for v in [*metrics_train.values(), *metrics_val.values(), lr_epoch]]) + "\n")
@@ -438,16 +435,15 @@ for epoch in range(start_epoch, start_epoch + nb_epoch):   # nb_epoch : plafond 
                     "best_params": best_params,
                     "epochs_no_improve": epochs_no_improve,
                     "lr_current": lr_current,
+                    "debut_stage": debut_stage,
                 }, f)
             print(f"  → Checkpoint sauvegardé (epoch {epoch})")
 
         if jnp.isnan(loss_train):
             print(f"NaN détecté à l'epoch {epoch}, arrêt.")
             break
-        if lr_current < MIN_LR:
-            print(f"Arrêt à l'epoch {epoch} : LR {lr_current:.2e} < MIN_LR {MIN_LR:.0e}. Meilleure val: {best_val:.6f}")
-            break
 
+print(f"Fin du cosine (epoch {debut_stage + nb_epoch - 1}, LR → {MIN_LR:.0e}). Meilleur critère val (phys+hf) : {best_val:.6f}")
 loss_log.close()
 print(f"Losses écrites dans {LOSS_LOG_PATH}")
 
