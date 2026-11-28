@@ -29,7 +29,7 @@ def euler_state(rho, u, p):
 
 
 def blast(x):
-    p = jnp.where(x < 0.1, 1.0, jnp.where(x > 0.9, 1.0, 0.01))
+    p = jnp.where(x < 0.1, 1000.0, jnp.where(x > 0.9, 100.0, 0.01))
     return euler_state(jnp.ones_like(x), jnp.zeros_like(x), p)
 
 def sod(x):
