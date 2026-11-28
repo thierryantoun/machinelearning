@@ -8,7 +8,7 @@ SOLVER = "euler"
 
 K          = 40   # nombre de fréquences des conditions initiales (initial_data.py), sans lien avec le réseau
 
-N_TRAJ         = 150000  # nombre de trajectoires longues
+N_TRAJ         = 300000  # nombre de trajectoires longues
 MULTIPLE_STEPS = 1# nombre de paires (u_k, u_{n_steps+k}) par trajectoire longue
 N_TRAIN    = N_TRAJ * MULTIPLE_STEPS  # nombre total de paires de training
 n          = 256
@@ -25,8 +25,8 @@ LAMBDA     = 1             # lambda = T * V / dx fixé, en cellules : l'onde la 
 MARGE      = 10.0
 Q          = math.ceil(LAMBDA + MARGE)
 P          = Q - 1
-batch_size = 128
-nb_epoch   = 710   # plafond de sécurité par run (compté depuis l'epoch de reprise) : l'arrêt normal vient de MIN_LR (training.py)
+batch_size = 1024
+nb_epoch   = 200   # plafond de sécurité par run (compté depuis l'epoch de reprise) : l'arrêt normal vient de MIN_LR (training.py)
 n_batches  = N_TRAIN // batch_size
 
 lambda_hf   = 1.0
